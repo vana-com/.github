@@ -230,13 +230,15 @@ previous=$vector_commit
 cross_vector=$(awk '
   /description = "Published cross-platform encryption test constant"/ { wanted = 1; next }
   wanted && /stopwords = \[/ { values = 1; next }
+  wanted && values && /^  ]/ { exit }
   values { print }
-' "$config" | grep -Eo '[0-9a-f]{64}' | head -n 1)
+' "$config" | grep -Eo '[0-9a-f]{64}')
 dummy_vector=$(awk '
   /description = "Published DPv2 dummy-account test constant"/ { wanted = 1; next }
   wanted && /stopwords = \[/ { values = 1; next }
+  wanted && values && /^  ]/ { exit }
   values { print }
-' "$config" | grep -Eo '[0-9a-f]{64}' | head -n 1)
+' "$config" | grep -Eo '[0-9a-f]{64}')
 if [[ ! "$cross_vector" =~ ^[0-9a-f]{64}$ || ! "$dummy_vector" =~ ^[0-9a-f]{64}$ ]]; then
   printf 'expected one cross-platform and one dummy-account exact exception\n' >&2
   exit 1
