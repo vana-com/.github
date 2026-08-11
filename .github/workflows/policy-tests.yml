@@ -34,4 +34,4 @@ jobs:
           GITLEAKS_BIN: ${{ runner.temp }}/gitleaks/gitleaks
         run: |
           tests/run.sh
-          node --test tests/evm-key-liveness.test.mjs
+          node --test scripts/evm-key-liveness/scan.test.mjs

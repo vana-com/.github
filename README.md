@@ -1,7 +1,7 @@
 # vana-com shared GitHub configuration
 
 This repository contains Vana's trusted EVM private-key policy. Gitleaks is the
-required primary scanner. A separate advisory job enriches only Gitleaks
+authoritative primary scanner. A separate advisory job enriches only Gitleaks
 findings with EVM address derivation and public-chain liveness checks.
 
 ## What the CI check does
@@ -51,10 +51,11 @@ jobs:
 ```
 
 Replace `<released-commit-sha>` with the 40-character commit ID of a reviewed
-release. After the first successful run, make its observed scan job a required
-status check. This pin is immutable, so all repositories run the reviewed
-central implementation. Keep the small caller workflow code-owned, so a pull
-request cannot change the central pin without the security owner's review.
+release. This pin is immutable, so all repositories run the reviewed central
+implementation. Keep the small caller workflow code-owned, so a pull request
+cannot change the central pin without the security owner's review. The Gitleaks
+scan is the authoritative job; whether it is required for merge remains a
+separate, approved branch-protection decision in each caller repository.
 
 The workflow pins Gitleaks `v8.30.1` and verifies the downloaded archive's
 SHA-256 before executing it. Action references use immutable commit IDs. It
@@ -113,14 +114,14 @@ still be uploaded, cloned, cached, or indexed.
 scripts/install-gitleaks.sh .tools/gitleaks
 GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks tests/run.sh
 npm ci --ignore-scripts --prefix scripts/evm-key-liveness
-GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks node --test tests/evm-key-liveness.test.mjs
+GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks node --test scripts/evm-key-liveness/scan.test.mjs
 ```
 
 The test harness covers inline keys, clean hashes, add-then-remove history,
 split-line declarations, path-and-value exceptions, commit messages, merge
 resolutions, secret-named files, upstream-vendored-example exception bounds,
-and fail-closed argument and tool failures. It
-creates its own throwaway Git repository. The liveness tests use mocked RPC
+and fail-closed argument and tool failures. It creates its own throwaway Git
+repository. The liveness tests use mocked RPC
 responses for scalar validation, address derivation, active and inactive
 accounts, incomplete checks, redaction, and range materialization.
 

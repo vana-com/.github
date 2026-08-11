@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Adapted from vana-com/vana-smart-contracts PR #69 (Maciej Witowski); see NOTICE.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -105,19 +106,21 @@ function runGitleaksInventory({ snapshots, gitleaks, config }) {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function rpcCall(chain, method, params, fetchImpl, timeoutMs) {
+async function rpcCall(chain, method, params, fetchImpl, timeoutMs, requestId) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetchImpl(chain.url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }),
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`RPC returned HTTP ${response.status}`);
     const payload = await response.json();
-    if (payload.error || typeof payload.result !== "string") throw new Error("RPC returned an invalid response");
+    if (payload?.jsonrpc !== "2.0" || payload.id !== requestId || Object.hasOwn(payload, "error") || typeof payload.result !== "string") {
+      throw new Error("RPC returned an invalid response");
+    }
     return payload.result;
   } finally {
     clearTimeout(timeout);
@@ -153,26 +156,28 @@ export async function findUsedAddresses(addresses, chains, options = {}) {
   const baseDelayMs = options.baseDelayMs ?? 100;
   const concurrency = options.concurrency ?? 3;
   const timeoutMs = options.timeoutMs ?? 5000;
+  let nextRequestId = 1;
+  const callRpc = (chain, method, params) => rpcCall(chain, method, params, fetchImpl, timeoutMs, nextRequestId++);
   const used = new Map();
   const status = [];
   for (const chain of chains) {
     try {
-      await withRetry(() => rpcCall(chain, "eth_blockNumber", [], fetchImpl, timeoutMs), attempts, baseDelayMs);
+      await withRetry(() => callRpc(chain, "eth_blockNumber", []), attempts, baseDelayMs);
     } catch (error) {
       status.push({ name: chain.name, ok: false, error: sanitizeError(error) });
       continue;
     }
     let failure;
     await mapPool(addresses, concurrency, async (address) => {
-      try {
-        const [nonce, balance] = await withRetry(() => Promise.all([
-          rpcCall(chain, "eth_getTransactionCount", [address, "latest"], fetchImpl, timeoutMs),
-          rpcCall(chain, "eth_getBalance", [address, "latest"], fetchImpl, timeoutMs),
-        ]), attempts, baseDelayMs);
-        if (BigInt(nonce) > 0n || BigInt(balance) > 0n) used.set(address, [...(used.get(address) ?? []), chain.name]);
-      } catch (error) {
-        failure ??= sanitizeError(error);
+      const [nonce, balance] = await Promise.allSettled([
+        withRetry(async () => BigInt(await callRpc(chain, "eth_getTransactionCount", [address, "latest"])), attempts, baseDelayMs),
+        withRetry(async () => BigInt(await callRpc(chain, "eth_getBalance", [address, "latest"])), attempts, baseDelayMs),
+      ]);
+      if ((nonce.status === "fulfilled" && nonce.value > 0n) || (balance.status === "fulfilled" && balance.value > 0n)) {
+        used.set(address, [...(used.get(address) ?? []), chain.name]);
       }
+      const rejected = [nonce, balance].find((result) => result.status === "rejected");
+      if (rejected?.status === "rejected") failure ??= sanitizeError(rejected.reason);
     });
     status.push(failure ? { name: chain.name, ok: false, error: failure } : { name: chain.name, ok: true });
   }
@@ -185,14 +190,18 @@ export function reportAdvisory(candidates, used, status) {
     const address = deriveAddress(key);
     const chains = used.get(address);
     if (!chains) continue;
-    for (const location of locations) lines.push(`warning: active EVM key candidate at ${safeLocation(location.commit).slice(0, 12)}:${safeLocation(location.file)}:${location.line} derives to ${address} (${chains.map(safeName).join(", ")})`);
+    for (const location of locations) lines.push(`active EVM key candidate at ${safeLocation(location.commit).slice(0, 12)}:path-sha256=${pathDigest(location.file)}:${location.line} derives to ${address} (${chains.map(safeName).join(", ")})`);
   }
-  for (const chain of status.filter((entry) => !entry.ok)) lines.push(`warning: incomplete liveness check for ${safeName(String(chain.name))}: ${sanitizeError(chain.error)}`);
+  for (const chain of status.filter((entry) => !entry.ok)) lines.push(`incomplete liveness check for ${safeName(String(chain.name))}: ${sanitizeError(chain.error)}`);
   return lines;
 }
 
 function safeLocation(value) {
   return redactScalarLikeText(value).replace(/[\x00-\x1f\x7f]/g, "_").replace(/::/g, "__").slice(0, 300);
+}
+
+function pathDigest(value) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 function emitWarning(message) {

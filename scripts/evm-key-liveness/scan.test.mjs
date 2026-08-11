@@ -13,13 +13,13 @@ import {
   parseCli,
   reportAdvisory,
   sanitizeError,
-} from "../scripts/evm-key-liveness/scan.mjs";
+} from "./scan.mjs";
 
 const key = ["0xd1e5b1a0f6c8e3a94b7f2c5d8e0a3f6b", "9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f"].join("");
 const address = "0x0ceb6d5e139c6f79ab76d69a0d81d4ade23f0f3b";
 
-function response(result) {
-  return { ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result }) };
+function response(result, id) {
+  return { ok: true, json: async () => ({ jsonrpc: "2.0", id, result }) };
 }
 
 test("accepts only valid secp256k1 scalar candidates", () => {
@@ -68,11 +68,11 @@ test("caps candidate and location inventory", () => {
 test("marks an active RPC address without querying a candidate twice", async () => {
   const calls = [];
   const fetchImpl = async (_url, request) => {
-    const { method } = JSON.parse(request.body);
+    const { method, id } = JSON.parse(request.body);
     calls.push(method);
-    if (method === "eth_blockNumber") return response("0x10");
-    if (method === "eth_getTransactionCount") return response("0x0");
-    return response("0x1");
+    if (method === "eth_blockNumber") return response("0x10", id);
+    if (method === "eth_getTransactionCount") return response("0x0", id);
+    return response("0x1", id);
   };
   const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid/token" }], { fetchImpl, attempts: 1, baseDelayMs: 0 });
   assert.deepEqual(result.used.get(address), ["mock"]);
@@ -82,7 +82,10 @@ test("marks an active RPC address without querying a candidate twice", async () 
 
 test("marks an inactive RPC address as checked", async () => {
   const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
-    fetchImpl: async (_url, request) => response(JSON.parse(request.body).method === "eth_blockNumber" ? "0x10" : "0x0"),
+    fetchImpl: async (_url, request) => {
+      const { method, id } = JSON.parse(request.body);
+      return response(method === "eth_blockNumber" ? "0x10" : "0x0", id);
+    },
     attempts: 1,
     baseDelayMs: 0,
   });
@@ -94,15 +97,62 @@ test("retries transient RPC errors", async () => {
   let attempts = 0;
   const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => {
-      const { method } = JSON.parse(request.body);
+      const { method, id } = JSON.parse(request.body);
       if (method === "eth_blockNumber" && attempts++ === 0) throw new Error("transient failure");
-      return response(method === "eth_blockNumber" ? "0x10" : "0x0");
+      return response(method === "eth_blockNumber" ? "0x10" : "0x0", id);
     },
     attempts: 2,
     baseDelayMs: 0,
   });
   assert.equal(attempts, 2);
   assert.deepEqual(result.status, [{ name: "mock", ok: true }]);
+});
+
+test("rejects malformed JSON-RPC envelopes", async () => {
+  for (const payload of [
+    { jsonrpc: "1.0", id: 1, result: "0x10" },
+    { jsonrpc: "2.0", id: 2, result: "0x10" },
+    { jsonrpc: "2.0", id: 1, result: null },
+    { jsonrpc: "2.0", id: 1, error: { code: -32000, message: "mock failure" } },
+  ]) {
+    const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+      fetchImpl: async () => ({ ok: true, json: async () => payload }),
+      attempts: 1,
+      baseDelayMs: 0,
+    });
+    assert.deepEqual(result.status, [{ name: "mock", ok: false, error: "RPC returned an invalid response" }]);
+  }
+});
+
+test("retains a positive nonce when the balance request fails", async () => {
+  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+    fetchImpl: async (_url, request) => {
+      const { method, id } = JSON.parse(request.body);
+      if (method === "eth_blockNumber") return response("0x10", id);
+      if (method === "eth_getTransactionCount") return response("0x1", id);
+      throw new Error("balance request failed");
+    },
+    attempts: 1,
+    baseDelayMs: 0,
+  });
+  assert.deepEqual(result.used.get(address), ["mock"]);
+  assert.deepEqual(result.status, [{ name: "mock", ok: false, error: "balance request failed" }]);
+});
+
+test("retains a positive balance when the nonce result is malformed", async () => {
+  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+    fetchImpl: async (_url, request) => {
+      const { method, id } = JSON.parse(request.body);
+      if (method === "eth_blockNumber") return response("0x10", id);
+      if (method === "eth_getTransactionCount") return response("not-a-quantity", id);
+      return response("0x1", id);
+    },
+    attempts: 1,
+    baseDelayMs: 0,
+  });
+  assert.deepEqual(result.used.get(address), ["mock"]);
+  assert.equal(result.status[0].ok, false);
+  assert.match(result.status[0].error, /Cannot convert/);
 });
 
 test("records timed-out RPC calls as incomplete", async () => {
@@ -132,12 +182,17 @@ test("records an incomplete RPC check and redacts its URL", async () => {
 });
 
 test("advisory output warns for findings and incompleteness without exposing keys", () => {
-  const candidates = new Map([[key, [{ commit: "a".repeat(40), file: `source\u001b[2J-${key}`, line: 2 }]]]);
+  const firstHalf = key.slice(2, 34);
+  const secondHalf = key.slice(34);
+  const candidates = new Map([[key, [{ commit: "a".repeat(40), file: `source\u001b[2J-full-${key}/halves-${firstHalf}-${secondHalf}`, line: 2 }]]]);
   const lines = reportAdvisory(candidates, new Map([[address, ["mock"]]]), [{ name: "mock", ok: false, error: "timeout" }]);
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /warning: active EVM key candidate/);
+  assert.match(lines[0], /active EVM key candidate/);
+  assert.match(lines[0], /path-sha256=[0-9a-f]{16}/);
   assert.equal(lines.join("\n").includes(key), false);
   assert.equal(lines.join("\n").includes(key.slice(2, 10)), false);
+  assert.equal(lines.join("\n").includes(firstHalf), false);
+  assert.equal(lines.join("\n").includes(secondHalf), false);
   assert.equal(lines.join("\n").includes("\u001b"), false);
   assert.match(lines[1], /incomplete liveness check/);
   assert.equal(sanitizeError(new Error("https://rpc.example.invalid/private-token")).includes("private-token"), false);
