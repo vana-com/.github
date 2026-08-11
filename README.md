@@ -1,8 +1,8 @@
 # vana-com shared GitHub configuration
 
-This repository contains the single trusted implementation of Vana's raw EVM
-private-key check. It is deliberately a thin, pinned wrapper around Gitleaks,
-not a second secret scanner.
+This repository contains Vana's trusted EVM private-key policy. Gitleaks is the
+required primary scanner. A separate advisory job enriches only Gitleaks
+findings with EVM address derivation and public-chain liveness checks.
 
 ## What the CI check does
 
@@ -17,7 +17,16 @@ The rule finds 64-hex-character EVM private-key candidates when they are within
 two lines of a secret-shaped declaration or stored in a secret-named file such
 as `private-key`. It intentionally does not scan arbitrary 32-byte hashes.
 Findings are redacted; the workflow prints a commit ID, never the candidate
-value.
+value. The advisory job deduplicates the primary candidates across the whole
+range before it queries RPC endpoints. It reports active-address findings and
+incomplete endpoint checks as warnings; an internal scanner or inventory error
+still fails that job.
+
+The advisory scanner runs only code from the immutable policy checkout. It
+materializes caller Git objects as data and does not run caller scripts, install
+caller dependencies, or use a caller package lifecycle. Its implementation is
+Apache-2.0 because it adapts Vana smart-contracts PR 69 by Maciej; see
+[`scripts/evm-key-liveness/NOTICE`](scripts/evm-key-liveness/NOTICE).
 
 This release does **not** detect BIP-39 mnemonics. A reliable mnemonic rule
 must validate the BIP-39 checksum against its word list to avoid flagging normal
@@ -103,14 +112,21 @@ still be uploaded, cloned, cached, or indexed.
 ```bash
 scripts/install-gitleaks.sh .tools/gitleaks
 GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks tests/run.sh
+npm ci --ignore-scripts --prefix scripts/evm-key-liveness
+GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks node --test tests/evm-key-liveness.test.mjs
 ```
 
 The test harness covers inline keys, clean hashes, add-then-remove history,
 split-line declarations, path-and-value exceptions, commit messages, merge
 resolutions, secret-named files, upstream-vendored-example exception bounds,
 and fail-closed argument and tool failures. It
-creates its own throwaway Git repository.
+creates its own throwaway Git repository. The liveness tests use mocked RPC
+responses for scalar validation, address derivation, active and inactive
+accounts, incomplete checks, redaction, and range materialization.
 
 ## License
 
-[MIT](LICENSE)
+The repository root is [MIT licensed](LICENSE). The isolated
+[`scripts/evm-key-liveness`](scripts/evm-key-liveness) adaptation is
+[Apache-2.0 licensed](scripts/evm-key-liveness/LICENSE); its
+[NOTICE](scripts/evm-key-liveness/NOTICE) preserves the source attribution.

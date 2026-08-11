@@ -1,0 +1,8 @@
+EVM key liveness advisory scanner
+
+Portions adapted from vana-com/vana-smart-contracts pull request #69, authored
+by Maciej Witowski, commit edbd95b66e94f82a734b21322ca26f972c904a60.
+
+The source repository's root LICENSE at that commit is Apache-2.0. This
+directory is licensed under Apache-2.0. The surrounding vana-com/.github
+repository remains MIT licensed.

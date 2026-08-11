@@ -41,3 +41,52 @@ jobs:
             --range "$BASE..$HEAD" \
             --config "$GITHUB_WORKSPACE/policy/.gitleaks.toml" \
             --gitleaks "$RUNNER_TEMP/gitleaks/gitleaks"
+
+  semantic-liveness:
+    name: semantic liveness (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the trusted scanner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up trusted Node runtime
+        uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
+        with:
+          node-version: 22
+
+      - name: Install verified Gitleaks
+        run: policy/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks"
+
+      - name: Install pinned liveness dependencies
+        run: npm ci --ignore-scripts --prefix policy/scripts/evm-key-liveness
+
+      - name: Check advisory EVM key liveness
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          # Public endpoints only. The central policy checkout, never the
+          # caller checkout or package lifecycle, reads this environment.
+          EVM_KEY_LIVENESS_RPC_URLS: vana=https://rpc.vana.org,moksha=https://rpc.moksha.vana.org
+        run: |
+          policy/scripts/materialize-commit-range.sh \
+            --repo "$GITHUB_WORKSPACE/source" \
+            --range "$BASE..$HEAD" \
+            --output "$RUNNER_TEMP/evm-key-snapshots"
+          node policy/scripts/evm-key-liveness/scan.mjs \
+            --snapshots "$RUNNER_TEMP/evm-key-snapshots" \
+            --config "$GITHUB_WORKSPACE/policy/.gitleaks.toml" \
+            --gitleaks "$RUNNER_TEMP/gitleaks/gitleaks"
