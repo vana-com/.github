@@ -1,0 +1,116 @@
+# vana-com shared GitHub configuration
+
+This repository contains the single trusted implementation of Vana's raw EVM
+private-key check. It is deliberately a thin, pinned wrapper around Gitleaks,
+not a second secret scanner.
+
+## What the CI check does
+
+The reusable workflow scans **every commit introduced by a pull request**. For
+each commit it scans complete snapshots of only that commit's changed files.
+This matters for two cases that an endpoint diff misses:
+
+- a key added in one commit and removed in a later commit; and
+- a value added below an unchanged `privateKey` declaration.
+
+The rule finds 64-hex-character EVM private-key candidates when they are within
+two lines of a secret-shaped declaration or stored in a secret-named file such
+as `private-key`. It intentionally does not scan arbitrary 32-byte hashes.
+Findings are redacted; the workflow prints a commit ID, never the candidate
+value.
+
+This release does **not** detect BIP-39 mnemonics. A reliable mnemonic rule
+must validate the BIP-39 checksum against its word list to avoid flagging normal
+prose. Gitleaks alone cannot do that deterministically, so this project makes no
+mnemonic-detection claim.
+
+## Use from a protected pull-request workflow
+
+Create this small caller workflow in each participating repository:
+
+```yaml
+name: secret scan
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  evm-key-scan:
+    uses: vana-com/.github/.github/workflows/evm-key-scan.yml@<released-commit-sha>
+```
+
+Replace `<released-commit-sha>` with the 40-character commit ID of a reviewed
+release. After the first successful run, make its observed scan job a required
+status check. This pin is immutable, so all repositories run the reviewed
+central implementation. Keep the small caller workflow code-owned, so a pull
+request cannot change the central pin without the security owner's review.
+
+The workflow pins Gitleaks `v8.30.1` and verifies the downloaded archive's
+SHA-256 before executing it. Action references use immutable commit IDs. It
+checks out the pull request and the trusted policy as sibling directories, so
+untrusted pull-request content cannot shadow the policy checkout.
+
+## Optional local pre-push safeguard
+
+Git hooks are not policy: they can be missing, stale, or bypassed with
+`git push --no-verify`. CI and branch protection are the enforcement layer.
+The hook is still useful because it stops an accidental public leak before it
+leaves the workstation.
+
+Clone this repository at the same reviewed release commit somewhere durable,
+then:
+
+```bash
+scripts/install-pre-push.sh --shared-dir /path/to/vana-dotgithub-build --repo /path/to/public-repo
+```
+
+The installer refuses to overwrite an existing hook. Use a hook manager or
+merge the launcher deliberately when another pre-push hook already exists. It
+records the selected shared checkout in the installed launcher, so no shell
+environment setup is required.
+The hook runs offline after its first verified Gitleaks download and sends no
+source or candidate values over the network. For a new remote branch, it scans
+only commits not reachable from locally fetched `refs/remotes/<remote>` tips;
+run `git fetch <remote>` first if those refs may be stale.
+
+## False positives and remediation
+
+Inline `gitleaks:allow` comments are disabled. For published compatibility
+vectors, add a centrally reviewed exception that requires both the exact value
+and an anchored fixture or documentation path. Never allowlist a commit, a path
+alone, or a value alone.
+
+Do not treat a value as harmless because it appears in a test or load-test
+file. A reviewed historical inventory found operational Moksha accounts in
+SDK load-test data; those values are intentionally not excepted. Exceptions in
+this policy are limited to independently verified inert compatibility or dummy
+constants, an invalid configuration sentinel, and a documentation mock.
+
+One additional reviewed exception covers 86 published upstream wallet-library
+example values that Vana vendors under 14 exact `stats-client/node_modules`
+paths. It requires both a listed value and one of those anchored paths. It does
+not exempt `node_modules` generally, a path suffix or shadow path, or a
+value outside the reviewed set.
+
+If the check finds a real key, remove it from all unpushed commits and rotate it.
+Deleting it in a later commit does not make it safe: the earlier commit can
+still be uploaded, cloned, cached, or indexed.
+
+## Verify a checkout
+
+```bash
+scripts/install-gitleaks.sh .tools/gitleaks
+GITLEAKS_BIN=$PWD/.tools/gitleaks/gitleaks tests/run.sh
+```
+
+The test harness covers inline keys, clean hashes, add-then-remove history,
+split-line declarations, path-and-value exceptions, commit messages, merge
+resolutions, secret-named files, upstream-vendored-example exception bounds,
+and fail-closed argument and tool failures. It
+creates its own throwaway Git repository.
+
+## License
+
+[MIT](LICENSE)

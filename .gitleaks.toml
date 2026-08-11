@@ -1,0 +1,346 @@
+title = "vana-com EVM key scanning"
+minVersion = "v8.28.0"
+
+# GitHub secret scanning covers provider-issued credentials. This deliberately
+# narrow rule covers raw EVM private keys, which have no issuer prefix.
+[extend]
+useDefault = false
+
+[[rules]]
+id = "raw-evm-private-key-near-secret-declaration"
+description = "64-hex EVM private key near a secret-shaped declaration"
+regex = '''(?i)\b(?:0x)?([0-9a-f]{64})\b'''
+secretGroup = 1
+
+  # This composite rule uses complete changed-file snapshots, so a declaration
+  # on the preceding or following line remains visible.
+  [[rules.required]]
+  id = "secret-shaped-declaration"
+  regex = '''(?i)(?:^|[^a-z0-9])(?:priv[ _-]?keys?|(?:deployer|signer|wallet)[ _-]?keys?|(?:app|builder|deployer|ephemeral|recipient|wallet|signer|owner|account)[ _-]?private[ _-]?keys?|signing[ _-]?keys?|(?:private|secret)[ _-]?keys?(?:[ _-]?(?:hex|bytes|buffer))?|key[ _-]?material)(?:[^a-z0-9]|$)'''
+  withinLines = 2
+
+  [[rules.allowlists]]
+  description = "Published upstream wallet-library examples vendored in Vana"
+  # The reviewed value-and-path inventory is exact. Do not broaden it to a
+  # directory-wide exemption; matching primary rules evaluate this policy
+  # independently.
+  condition = "AND"
+  paths = [
+    '''^content/stats-client/node_modules/@noble/curves/README\.md$''',
+    '''^content/stats-client/node_modules/ethereum-cryptography/README\.md$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/account\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/account\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/wallet\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/wallet\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/esm/account\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/esm/wallet\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/types/account\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/types/wallet\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/src/account\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/src/wallet\.ts$''',
+    '''^content/stats-client/node_modules/web3/dist/web3\.min\.js$''',
+    '''^content/stats-client/node_modules/web3/dist/web3\.min\.js\.map$''',
+  ]
+  stopwords = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000001",
+    "00000000000000000000000000000000000000000000000000000000000060a7",
+    "00000000000000000000000000000000000000000000000000000000d88b2e40",
+    "00000000000000000000000027fd43babfbe83a81d14665b1a6fb8030a60c9b4",
+    "0000000000000000000000002fb2457f6ec1865dc0d4e7300c696b69c2a1b989",
+    "0062a853de302513c57bfe3108ab493733034bf3cb313326f42cf26ea2619cf9",
+    "08ba6736363c5586434cd5b895e6fe41ea7db4785bd9b901dedce77a1514e8b8",
+    "08c673022000ece7964ea4db2d9369c50442b2869cbd8fc21baaca59e18f642c",
+    "11bbe8db4e347b4e8c937c1c8370e4b5ed33adb3db69cbdb7a38e1e50b1b82fa",
+    "18f020b98eb798752a50ed0563b079c125b0db5dd0b1060d1c1b47d4a193e1e4",
+    "1da44b586eb0729ff70a73c326926f6ed5a25f5b056e7f47fbc6e58d86871655",
+    "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+    "1e046a882bb38236b646c9f135cf90ad90a140810f439875f2a6dd8e50fa261f",
+    "208dd732a27aa4803bb760228dff18515d5313fd085bbce60594a3919ae2d88d",
+    "210d0ec956787d865358ac45716e6dd42e68d48e346d795746509523aeb477dd",
+    "27344e77871c8b2068bc998bf28e0b5f9920867a69c455b2ed0c1c150fec098e",
+    "28b7b75f7ba48d588a902c1ff4d5d13cc0ca9ac0aaa39562368146923fb853bf",
+    "29a6194691f91a73715209ef6512e576722830a201be2018a765e85a9ecee931",
+    "2f684bda12f684bda12f684bda12f684bda12f684bda12f684bda12f38e38d84",
+    "31ab4ea571a9e10d3a19aaed07d190595b1dfa34e03960c04293fec565dea536",
+    "334485e42b33815fd2cf8a245a5393b282214060844a9681495df2257140e75c",
+    "348ce564d427a3311b6536bbcff9390d69395b06ed6c486954e971d960fe8709",
+    "38b71399bf0c8925749ab79e91ce6cd2fc068c84c18ff6a197b48c4cbef01e00",
+    "3f8731abdd661adca08a5558f0f5d272e953d363cb6f0e5d405447c01a444533",
+    "410544c8307e3691fda305eb3722d82c3431f212a87daa119a21587d96698b57",
+    "43a26051362b8040b289abe93334a5e3662751aa691185ae9e9a2e1e0c169350",
+    "46eb4884e82dc43b5aa415faba53cc653b7038e9d61cc32fd643cf8c396189b7",
+    "4bda12f684bda12f684bda12f684bda12f684bda12f684bda12f684b8e38e23c",
+    "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+    "519f0130a1d662841d4a28082e9c9bb0a15e0e59bb46cfc39a52f0e285dec6b9",
+    "534c328d23f234e6e2a413deca25caece4506144037c40314ecbd0b53d9dd262",
+    "5365706f6c69612c20417468656e732c204174746963612c2047726565636521",
+    "53e41351267b20d4a89ebfe9c8f03c04de9b345add4a52f15bd026b63c8fb150",
+    "5744f24d5f0aff6c70487c8e85adf07d8564e50b08558788f00479611d7bae5f",
+    "6007e74cd82e037b800186422fc2da167c747ef045e5d18a5f5d4300f8e1a029",
+    "61533efa77937360215069d5d6cb0be09a22af9721e6dc3df59d957833ed8870",
+    "6422c9d28efdcbee93c1d32a5fc6fd6fa081b985487885296cf8c9bbb5872600",
+    "6484aa716545ca2cf3a70c3fa8fe337e0a3d21162f0d6299a7bf8192bfd2a76f",
+    "65e3df790ab2a32068b13cff970b26445b8995229ae4abbed61bd996f09fce69",
+    "67d53f170b908cabb9eb326c3c337762d59289a8fec79f7bc9254b584b73265c",
+    "67f476289210e3bef3c1c75e4de993ff0a00663df00def84e73aa7411eac18a6",
+    "690d984493560552e3ebdcc19a65b9c301ea9ddc82d3ab8cfde60485fd5722ce",
+    "6a743c9b367d15f4758e4f3f3378ff0fd443708d1c64854e07588ea5331823ae",
+    "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e",
+    "756530f13c0eb636ebdda655335f5dea9921e3362e2e588b0ad59e556f7751f0",
+    "76512156a34105fa6473ad040c666ae7b917d14c06543accc0d2dc28e6073b12",
+    "78a5a6b2876c3985f90f82073d18d57ac299b608cc76a4ba697b8bb085048347",
+    "7a06534bb8bdb49fd5e9e6632722c2989467c1bfc8e8d978dfb425d2685c2573",
+    "7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee",
+    "7d34deae112841fba86e3e6cf08f5398dda323a8e4d29332621534e2c4069e8d",
+    "7ee61c5282979aae9dd795bb6a54e8bdc2bfe009acb64eb9a67322eec3b3da6e",
+    "8144a6fa26be252b86456491fbcd43c1de7e022241845ffea1c3df066f7cfede",
+    "87a51da18900da7398b3bab03996833138f269f8f66dd1237b98df6b9ce14573",
+    "8d179a911d6146ad2924e86bf493ed89b8ff3596ffec0816e761c542016ab13c",
+    "8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa88c",
+    "8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7",
+    "93da7e2ddd6b2ff1f5af0c752f052ed0d7d5bff19257db547a69cd9a879b37d4",
+    "9445325c3c5638c9fe425b003b8c32f03e9f99d409555a650a6838ba712bb51b",
+    "964ced1c69ad27a311c432fdc0d8211e987595f7eb34ab405a5f16bdc9563ec5",
+    "9e746a1d906b299def98c75b06f714d62dacadd567c7515d76eeaa8c8074c738",
+    "a33321f98e4ff1c283c76998f14f57447545d339b3db534c6d886decb4209f28",
+    "a8037a6116c176a25e6fc224947fde9e79a2deaa0dd8b67b366fbdfdbffc01f9",
+    "abe40cb08850da918ee951b237fa87946499b2d8643e4aa12b0610b050c731f6",
+    "b91467e570a6466aa9e9876cbcd013baba02900b8979d43fe208a4a4f339f5fd",
+    "bce9b59981303e76c4878b1a6d7b088ec6b9dd5c966b7d5f54d7a749ff683387",
+    "be6383dad004f233317e46ddb46ad31b16064d14447a95cc1d8c8d4bc61c3728",
+    "c55ea24bdb4c379550a7c9a6818ac39ca33e75bc78ddb862bd82c31cc1c7a073",
+    "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+    "c75e0c32d5cb7c0fa9d0a54b12a0a6d5647ab046d686da6fdffc90fc201d71a3",
+    "c951c03238fe930e6e69ab9d6af9f29248a514048e44884f0e60c4de40de3526",
+    "cb3e13e3281ff3861a3f0257fad4c9a51b0eb046f9c7821825c46b210f040b8f",
+    "cb9712d1982ff89f571fa5dbef447f14b7e5f142232bd2a913aac833730eeb43",
+    "d2eb068b37e2df55f56fa97a2bf4f55e072bef0dd703bfd917717d9dc54510f0",
+    "d35771193d94918a9ca34ccbb7b640dd86cd409542f8487d9fe6b745781eb49b",
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+    "e0f04b04861ecfa95e82a9310d6a7ef7aef8d7417f5209c182582bfb98a8e307",
+    "e32bb97084479d32247f66f8b46d00af2fbc3c2db2bc6e5843fe2e4d1ca9b099",
+    "ed69a8c50cf8c9836be3b67c7eeff416612d45ba39a5c099d48fa668bf558c9c",
+    "ed6c11b0b5b808960df26f5bfc471d04c1995b0ffd2055925ad1be28d6baadfd",
+    "edadc6f64383dc1df7c4b2d51b54225406d36b641f5e41bbc52a56612a8c6d14",
+    "efbf6d3409f37c0084a79d5fdf9a6f5d97d11447517ef1ea8374f51e581b7efd",
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffff93b",
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  ]
+
+  [[rules.allowlists]]
+  description = "Published ECIES compatibility vectors"
+  # These exact public values are exempt only in ECIES vector fixtures.
+  condition = "AND"
+  paths = [
+    '''^content/packages/vana-sdk/scripts/generate-test-vectors\.js$''',
+    '''^content/packages/vana-sdk/src/crypto/ecies/__tests__/compatibility\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/crypto/ecies/__tests__/test-vectors\.ts$''',
+    '''^content/packages/vana-sdk/src/crypto/ecies/test-vectors/eccrypto-vectors\.json$''',
+  ]
+  stopwords = [
+    "1878693c39d810ce44ee40f9fdd068a0414615e74a7ff58adaba74063b2402e4",
+    "21796c4692ba9d34b7f273c0099b96625e8dec49ada0390724d23dc35f4986d1",
+    "ae1a9ea14589c1d18c6f4c9683d4ee970d389cac2844cece049e1a2f5ee3f62e",
+    "d447811abc5bae2fd9c53f97569c50338108154cfa36f18fdbc300bcad37f493",
+    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  ]
+  [[rules.allowlists]]
+  description = "Published cross-platform encryption test constant"
+  # This exact inert test constant is exempt only in reviewed encryption tests.
+  condition = "AND"
+  paths = [
+    '''^content/packages/vana-sdk/src/tests/encryption-correct-implementation\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/tests/encryption-coverage\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/tests/platform-crypto-expanded\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/tests/platform-shared-utils\.test\.ts$''',
+  ]
+  stopwords = [
+    "85271071a553feafb93839045545c233d0518e0b0fc583f88038f8b0e32e9f18",
+  ]
+
+  [[rules.allowlists]]
+  description = "Published faucet planning mock"
+  # This exact public mock is exempt only in this reviewed documentation path.
+  condition = "AND"
+  paths = [ '''^content/docs/plans/2026-06-26-faucet-agent-claim-api\.md$''' ]
+  stopwords = [ "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" ]
+
+  [[rules.allowlists]]
+  description = "Invalid Vana validator-key default sentinel"
+  # Scalar zero is not a valid secp256k1 key. Exempt this exact sentinel only
+  # where Vana documents or checks that the operator must replace it.
+  condition = "AND"
+  paths = [
+    '''^content/\.env\.example$''',
+    '''^content/\.env\.mainnet\.example$''',
+    '''^content/\.env\.maya\.example$''',
+    '''^content/\.env\.moksha\.example$''',
+    '''^content/check-config\.sh$''',
+    '''^content/container-scripts/check-config\.sh$''',
+  ]
+  stopwords = [ "0000000000000000000000000000000000000000000000000000000000000000" ]
+
+# Keep value exceptions separated from rule identifiers. The policy's own
+# declaration-context rule scans this file in a regression test.
+# (These comments are intentionally not secret-shaped declarations.)
+[[rules]]
+id = "raw-evm-private-key-near-direct-api-call"
+description = "64-hex EVM private key adjacent to a direct wallet API call"
+regex = '''(?i)\b(?:0x)?([0-9a-f]{64})\b'''
+secretGroup = 1
+
+  # A direct-call context is intentionally tighter than a declaration context.
+  # This avoids treating unrelated 32-byte identifiers as keys several lines
+  # after privateKeyToAccount(generatePrivateKey()).
+  [[rules.required]]
+  id = "direct-wallet-api-call"
+  regex = '''(?i)\b(?:privateKeyToAccount|(?:ethers\s*\.\s*)?(?:Wallet|SigningKey))\s*\('''
+  withinLines = 1
+
+  [[rules.allowlists]]
+  description = "Published upstream wallet-library examples vendored in Vana"
+  # This duplicates the same reviewed inventory because direct API calls are
+  # a separate primary rule with independent allowlist evaluation.
+  condition = "AND"
+  paths = [
+    '''^content/stats-client/node_modules/@noble/curves/README\.md$''',
+    '''^content/stats-client/node_modules/ethereum-cryptography/README\.md$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/account\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/account\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/wallet\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/commonjs/wallet\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/esm/account\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/esm/wallet\.js$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/types/account\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/lib/types/wallet\.d\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/src/account\.ts$''',
+    '''^content/stats-client/node_modules/web3-eth-accounts/src/wallet\.ts$''',
+    '''^content/stats-client/node_modules/web3/dist/web3\.min\.js$''',
+    '''^content/stats-client/node_modules/web3/dist/web3\.min\.js\.map$''',
+  ]
+  stopwords = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000001",
+    "00000000000000000000000000000000000000000000000000000000000060a7",
+    "00000000000000000000000000000000000000000000000000000000d88b2e40",
+    "00000000000000000000000027fd43babfbe83a81d14665b1a6fb8030a60c9b4",
+    "0000000000000000000000002fb2457f6ec1865dc0d4e7300c696b69c2a1b989",
+    "0062a853de302513c57bfe3108ab493733034bf3cb313326f42cf26ea2619cf9",
+    "08ba6736363c5586434cd5b895e6fe41ea7db4785bd9b901dedce77a1514e8b8",
+    "08c673022000ece7964ea4db2d9369c50442b2869cbd8fc21baaca59e18f642c",
+    "11bbe8db4e347b4e8c937c1c8370e4b5ed33adb3db69cbdb7a38e1e50b1b82fa",
+    "18f020b98eb798752a50ed0563b079c125b0db5dd0b1060d1c1b47d4a193e1e4",
+    "1da44b586eb0729ff70a73c326926f6ed5a25f5b056e7f47fbc6e58d86871655",
+    "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+    "1e046a882bb38236b646c9f135cf90ad90a140810f439875f2a6dd8e50fa261f",
+    "208dd732a27aa4803bb760228dff18515d5313fd085bbce60594a3919ae2d88d",
+    "210d0ec956787d865358ac45716e6dd42e68d48e346d795746509523aeb477dd",
+    "27344e77871c8b2068bc998bf28e0b5f9920867a69c455b2ed0c1c150fec098e",
+    "28b7b75f7ba48d588a902c1ff4d5d13cc0ca9ac0aaa39562368146923fb853bf",
+    "29a6194691f91a73715209ef6512e576722830a201be2018a765e85a9ecee931",
+    "2f684bda12f684bda12f684bda12f684bda12f684bda12f684bda12f38e38d84",
+    "31ab4ea571a9e10d3a19aaed07d190595b1dfa34e03960c04293fec565dea536",
+    "334485e42b33815fd2cf8a245a5393b282214060844a9681495df2257140e75c",
+    "348ce564d427a3311b6536bbcff9390d69395b06ed6c486954e971d960fe8709",
+    "38b71399bf0c8925749ab79e91ce6cd2fc068c84c18ff6a197b48c4cbef01e00",
+    "3f8731abdd661adca08a5558f0f5d272e953d363cb6f0e5d405447c01a444533",
+    "410544c8307e3691fda305eb3722d82c3431f212a87daa119a21587d96698b57",
+    "43a26051362b8040b289abe93334a5e3662751aa691185ae9e9a2e1e0c169350",
+    "46eb4884e82dc43b5aa415faba53cc653b7038e9d61cc32fd643cf8c396189b7",
+    "4bda12f684bda12f684bda12f684bda12f684bda12f684bda12f684b8e38e23c",
+    "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+    "519f0130a1d662841d4a28082e9c9bb0a15e0e59bb46cfc39a52f0e285dec6b9",
+    "534c328d23f234e6e2a413deca25caece4506144037c40314ecbd0b53d9dd262",
+    "5365706f6c69612c20417468656e732c204174746963612c2047726565636521",
+    "53e41351267b20d4a89ebfe9c8f03c04de9b345add4a52f15bd026b63c8fb150",
+    "5744f24d5f0aff6c70487c8e85adf07d8564e50b08558788f00479611d7bae5f",
+    "6007e74cd82e037b800186422fc2da167c747ef045e5d18a5f5d4300f8e1a029",
+    "61533efa77937360215069d5d6cb0be09a22af9721e6dc3df59d957833ed8870",
+    "6422c9d28efdcbee93c1d32a5fc6fd6fa081b985487885296cf8c9bbb5872600",
+    "6484aa716545ca2cf3a70c3fa8fe337e0a3d21162f0d6299a7bf8192bfd2a76f",
+    "65e3df790ab2a32068b13cff970b26445b8995229ae4abbed61bd996f09fce69",
+    "67d53f170b908cabb9eb326c3c337762d59289a8fec79f7bc9254b584b73265c",
+    "67f476289210e3bef3c1c75e4de993ff0a00663df00def84e73aa7411eac18a6",
+    "690d984493560552e3ebdcc19a65b9c301ea9ddc82d3ab8cfde60485fd5722ce",
+    "6a743c9b367d15f4758e4f3f3378ff0fd443708d1c64854e07588ea5331823ae",
+    "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e",
+    "756530f13c0eb636ebdda655335f5dea9921e3362e2e588b0ad59e556f7751f0",
+    "76512156a34105fa6473ad040c666ae7b917d14c06543accc0d2dc28e6073b12",
+    "78a5a6b2876c3985f90f82073d18d57ac299b608cc76a4ba697b8bb085048347",
+    "7a06534bb8bdb49fd5e9e6632722c2989467c1bfc8e8d978dfb425d2685c2573",
+    "7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee",
+    "7d34deae112841fba86e3e6cf08f5398dda323a8e4d29332621534e2c4069e8d",
+    "7ee61c5282979aae9dd795bb6a54e8bdc2bfe009acb64eb9a67322eec3b3da6e",
+    "8144a6fa26be252b86456491fbcd43c1de7e022241845ffea1c3df066f7cfede",
+    "87a51da18900da7398b3bab03996833138f269f8f66dd1237b98df6b9ce14573",
+    "8d179a911d6146ad2924e86bf493ed89b8ff3596ffec0816e761c542016ab13c",
+    "8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa88c",
+    "8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7",
+    "93da7e2ddd6b2ff1f5af0c752f052ed0d7d5bff19257db547a69cd9a879b37d4",
+    "9445325c3c5638c9fe425b003b8c32f03e9f99d409555a650a6838ba712bb51b",
+    "964ced1c69ad27a311c432fdc0d8211e987595f7eb34ab405a5f16bdc9563ec5",
+    "9e746a1d906b299def98c75b06f714d62dacadd567c7515d76eeaa8c8074c738",
+    "a33321f98e4ff1c283c76998f14f57447545d339b3db534c6d886decb4209f28",
+    "a8037a6116c176a25e6fc224947fde9e79a2deaa0dd8b67b366fbdfdbffc01f9",
+    "abe40cb08850da918ee951b237fa87946499b2d8643e4aa12b0610b050c731f6",
+    "b91467e570a6466aa9e9876cbcd013baba02900b8979d43fe208a4a4f339f5fd",
+    "bce9b59981303e76c4878b1a6d7b088ec6b9dd5c966b7d5f54d7a749ff683387",
+    "be6383dad004f233317e46ddb46ad31b16064d14447a95cc1d8c8d4bc61c3728",
+    "c55ea24bdb4c379550a7c9a6818ac39ca33e75bc78ddb862bd82c31cc1c7a073",
+    "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+    "c75e0c32d5cb7c0fa9d0a54b12a0a6d5647ab046d686da6fdffc90fc201d71a3",
+    "c951c03238fe930e6e69ab9d6af9f29248a514048e44884f0e60c4de40de3526",
+    "cb3e13e3281ff3861a3f0257fad4c9a51b0eb046f9c7821825c46b210f040b8f",
+    "cb9712d1982ff89f571fa5dbef447f14b7e5f142232bd2a913aac833730eeb43",
+    "d2eb068b37e2df55f56fa97a2bf4f55e072bef0dd703bfd917717d9dc54510f0",
+    "d35771193d94918a9ca34ccbb7b640dd86cd409542f8487d9fe6b745781eb49b",
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+    "e0f04b04861ecfa95e82a9310d6a7ef7aef8d7417f5209c182582bfb98a8e307",
+    "e32bb97084479d32247f66f8b46d00af2fbc3c2db2bc6e5843fe2e4d1ca9b099",
+    "ed69a8c50cf8c9836be3b67c7eeff416612d45ba39a5c099d48fa668bf558c9c",
+    "ed6c11b0b5b808960df26f5bfc471d04c1995b0ffd2055925ad1be28d6baadfd",
+    "edadc6f64383dc1df7c4b2d51b54225406d36b641f5e41bbc52a56612a8c6d14",
+    "efbf6d3409f37c0084a79d5fdf9a6f5d97d11447517ef1ea8374f51e581b7efd",
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffff93b",
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  ]
+
+  [[rules.allowlists]]
+  description = "Published DPv2 dummy-account test constant"
+  # This exact inert dummy account value is exempt only in reviewed test paths.
+  condition = "AND"
+  paths = [
+    '''^content/packages/vana-sdk/scripts/test-multicall-simple\.ts$''',
+    '''^content/packages/vana-sdk/src/direct/controller\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/direct/escrow-payment\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/direct/personal-server-read\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/protocol/grants\.test\.ts$''',
+    '''^content/packages/vana-sdk/src/tests/data-ipfs-gateways\.test\.ts$''',
+  ]
+  stopwords = [
+    "0000000000000000000000000000000000000000000000000000000000000001",
+  ]
+
+[[rules]]
+id = "secret-shaped-declaration"
+description = "Auxiliary secret-shaped declaration matcher"
+regex = '''(?i)(?:^|[^a-z0-9])(?:priv[ _-]?keys?|(?:deployer|signer|wallet)[ _-]?keys?|(?:app|builder|deployer|ephemeral|recipient|wallet|signer|owner|account)[ _-]?private[ _-]?keys?|signing[ _-]?keys?|(?:private|secret)[ _-]?keys?(?:[ _-]?(?:hex|bytes|buffer))?|key[ _-]?material)(?:[^a-z0-9]|$)'''
+skipReport = true
+
+[[rules]]
+id = "direct-wallet-api-call"
+description = "Auxiliary direct wallet API matcher"
+regex = '''(?i)\b(?:privateKeyToAccount|(?:ethers\s*\.\s*)?(?:Wallet|SigningKey))\s*\('''
+skipReport = true
+
+[[rules]]
+id = "raw-evm-private-key-in-secret-named-file"
+description = "64-hex EVM private key in a secret-named file"
+regex = '''(?i)\b(?:0x)?([0-9a-f]{64})\b'''
+secretGroup = 1
+path = '''(?i)^content/(?:.*/)?\.?(?:priv[ _-]?keys?|(?:deployer|signer|wallet)[ _-]?keys?|(?:app|builder|deployer|ephemeral|recipient|wallet|signer|owner|account)[ _-]?private[ _-]?keys?|signing[ _-]?keys?|(?:private|secret)[ _-]?keys?(?:[ _-]?(?:hex|bytes|buffer))?|key[ _-]?material)(?:\.[a-z0-9._ -]+)?$'''

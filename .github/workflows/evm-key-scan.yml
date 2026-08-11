@@ -1,0 +1,43 @@
+name: EVM key scan
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the trusted scanner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install verified Gitleaks
+        run: policy/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks"
+
+      - name: Scan every introduced commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          policy/scripts/scan-commit-range.sh \
+            --repo "$GITHUB_WORKSPACE/source" \
+            --range "$BASE..$HEAD" \
+            --config "$GITHUB_WORKSPACE/policy/.gitleaks.toml" \
+            --gitleaks "$RUNNER_TEMP/gitleaks/gitleaks"

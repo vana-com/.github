@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Optional developer safeguard. Git hooks are local and bypassable; CI remains
+# the required enforcement point. This hook never sends source code anywhere.
+set -euo pipefail
+
+shared_dir=${VANA_SECRET_SCAN_HOME:-}
+if [[ -z "$shared_dir" ]]; then
+  printf 'VANA_SECRET_SCAN_HOME is unset; skipping optional EVM key scan.\n' >&2
+  exit 0
+fi
+
+scanner="$shared_dir/scripts/scan-commit-range.sh"
+installer="$shared_dir/scripts/install-gitleaks.sh"
+[[ -x "$scanner" && -x "$installer" ]] || {
+  printf 'VANA_SECRET_SCAN_HOME is not a valid shared scanner checkout.\n' >&2
+  exit 2
+}
+
+tool_dir="$shared_dir/.tools/gitleaks"
+if [[ ! -x "$tool_dir/gitleaks" ]]; then
+  "$installer" "$tool_dir"
+fi
+
+remote_name=${1:-origin}
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ "$local_sha" != '0000000000000000000000000000000000000000' ]] || continue
+  if [[ "$remote_sha" == '0000000000000000000000000000000000000000' ]]; then
+    # A new remote branch should not rescan history already published on the
+    # same remote. Use locally fetched remote-tracking tips as the boundary.
+    excludes=()
+    while IFS= read -r remote_tip; do
+      excludes+=(--exclude "$remote_tip")
+    done < <(git for-each-ref --format='%(objectname)' "refs/remotes/$remote_name")
+    "$scanner" --repo "$PWD" --include "$local_sha" --gitleaks "$tool_dir/gitleaks" "${excludes[@]}"
+  else
+    "$scanner" --repo "$PWD" --range "$remote_sha..$local_sha" --gitleaks "$tool_dir/gitleaks"
+  fi
+done
