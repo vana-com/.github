@@ -10,6 +10,7 @@ import {
   deriveAddress,
   findUsedAddresses,
   normalizeScalar,
+  parseEthereumQuantity,
   parseCli,
   reportAdvisory,
   sanitizeError,
@@ -17,6 +18,7 @@ import {
 
 const key = ["0xd1e5b1a0f6c8e3a94b7f2c5d8e0a3f6b", "9c2d5e8f1a4b7c0d3e6f9a2b5c8d1e4f"].join("");
 const address = "0x0ceb6d5e139c6f79ab76d69a0d81d4ade23f0f3b";
+const addresses = Array.of(address);
 
 function response(result, id) {
   return { ok: true, json: async () => ({ jsonrpc: "2.0", id, result }) };
@@ -31,6 +33,15 @@ test("accepts only valid secp256k1 scalar candidates", () => {
 
 test("derives the Ethereum address controlled by a scalar", () => {
   assert.equal(deriveAddress(key), address);
+});
+
+test("accepts only canonical Ethereum JSON-RPC quantities", () => {
+  assert.equal(parseEthereumQuantity("0x0"), 0n);
+  assert.equal(parseEthereumQuantity("0x1"), 1n);
+  assert.equal(parseEthereumQuantity("0xA"), 10n);
+  for (const value of ["not-a-quantity", 1, -1, "0x", "0x00", "0x01", "0X1", null]) {
+    assert.throws(() => parseEthereumQuantity(value), /RPC returned an invalid quantity/);
+  }
 });
 
 test("uses only Gitleaks report candidates and deduplicates the full range", () => {
@@ -74,14 +85,14 @@ test("marks an active RPC address without querying a candidate twice", async () 
     if (method === "eth_getTransactionCount") return response("0x0", id);
     return response("0x1", id);
   };
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid/token" }], { fetchImpl, attempts: 1, baseDelayMs: 0 });
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid/token" }], { fetchImpl, attempts: 1, baseDelayMs: 0 });
   assert.deepEqual(result.used.get(address), ["mock"]);
   assert.deepEqual(result.status, [{ name: "mock", ok: true }]);
   assert.deepEqual(calls, ["eth_blockNumber", "eth_getTransactionCount", "eth_getBalance"]);
 });
 
 test("marks an inactive RPC address as checked", async () => {
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => {
       const { method, id } = JSON.parse(request.body);
       return response(method === "eth_blockNumber" ? "0x10" : "0x0", id);
@@ -95,7 +106,7 @@ test("marks an inactive RPC address as checked", async () => {
 
 test("retries transient RPC errors", async () => {
   let attempts = 0;
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => {
       const { method, id } = JSON.parse(request.body);
       if (method === "eth_blockNumber" && attempts++ === 0) throw new Error("transient failure");
@@ -115,7 +126,7 @@ test("rejects malformed JSON-RPC envelopes", async () => {
     { jsonrpc: "2.0", id: 1, result: null },
     { jsonrpc: "2.0", id: 1, error: { code: -32000, message: "mock failure" } },
   ]) {
-    const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+    const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
       fetchImpl: async () => ({ ok: true, json: async () => payload }),
       attempts: 1,
       baseDelayMs: 0,
@@ -124,27 +135,36 @@ test("rejects malformed JSON-RPC envelopes", async () => {
   }
 });
 
-test("retains a positive nonce when the balance request fails", async () => {
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+test("rejects a noncanonical block-number quantity", async () => {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
+    fetchImpl: async (_url, request) => response("0x01", JSON.parse(request.body).id),
+    attempts: 1,
+    baseDelayMs: 0,
+  });
+  assert.deepEqual(result.status, [{ name: "mock", ok: false, error: "RPC returned an invalid quantity" }]);
+});
+
+test("retains a positive nonce when the balance quantity is malformed", async () => {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => {
       const { method, id } = JSON.parse(request.body);
       if (method === "eth_blockNumber") return response("0x10", id);
       if (method === "eth_getTransactionCount") return response("0x1", id);
-      throw new Error("balance request failed");
+      return response("0x01", id);
     },
     attempts: 1,
     baseDelayMs: 0,
   });
   assert.deepEqual(result.used.get(address), ["mock"]);
-  assert.deepEqual(result.status, [{ name: "mock", ok: false, error: "balance request failed" }]);
+  assert.deepEqual(result.status, [{ name: "mock", ok: false, error: "RPC returned an invalid quantity" }]);
 });
 
 test("retains a positive balance when the nonce result is malformed", async () => {
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => {
       const { method, id } = JSON.parse(request.body);
       if (method === "eth_blockNumber") return response("0x10", id);
-      if (method === "eth_getTransactionCount") return response("not-a-quantity", id);
+      if (method === "eth_getTransactionCount") return response("0x01", id);
       return response("0x1", id);
     },
     attempts: 1,
@@ -152,11 +172,11 @@ test("retains a positive balance when the nonce result is malformed", async () =
   });
   assert.deepEqual(result.used.get(address), ["mock"]);
   assert.equal(result.status[0].ok, false);
-  assert.match(result.status[0].error, /Cannot convert/);
+  assert.equal(result.status[0].error, "RPC returned an invalid quantity");
 });
 
 test("records timed-out RPC calls as incomplete", async () => {
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid" }], {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid" }], {
     fetchImpl: async (_url, request) => ({
       ok: true,
       json: () => new Promise((_resolve, reject) => {
@@ -171,7 +191,7 @@ test("records timed-out RPC calls as incomplete", async () => {
 });
 
 test("records an incomplete RPC check and redacts its URL", async () => {
-  const result = await findUsedAddresses([address], [{ name: "mock", url: "https://rpc.example.invalid/secret" }], {
+  const result = await findUsedAddresses(addresses, [{ name: "mock", url: "https://rpc.example.invalid/secret" }], {
     fetchImpl: async () => { throw new Error("request to https://rpc.example.invalid/secret failed"); },
     attempts: 1,
     baseDelayMs: 0,

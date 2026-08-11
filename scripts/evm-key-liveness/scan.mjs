@@ -127,6 +127,13 @@ async function rpcCall(chain, method, params, fetchImpl, timeoutMs, requestId) {
   }
 }
 
+export function parseEthereumQuantity(value) {
+  if (typeof value !== "string" || !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value)) {
+    throw new Error("RPC returned an invalid quantity");
+  }
+  return BigInt(value);
+}
+
 async function withRetry(operation, attempts, baseDelayMs) {
   let error;
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -162,7 +169,7 @@ export async function findUsedAddresses(addresses, chains, options = {}) {
   const status = [];
   for (const chain of chains) {
     try {
-      await withRetry(() => callRpc(chain, "eth_blockNumber", []), attempts, baseDelayMs);
+      await withRetry(async () => parseEthereumQuantity(await callRpc(chain, "eth_blockNumber", [])), attempts, baseDelayMs);
     } catch (error) {
       status.push({ name: chain.name, ok: false, error: sanitizeError(error) });
       continue;
@@ -170,8 +177,8 @@ export async function findUsedAddresses(addresses, chains, options = {}) {
     let failure;
     await mapPool(addresses, concurrency, async (address) => {
       const [nonce, balance] = await Promise.allSettled([
-        withRetry(async () => BigInt(await callRpc(chain, "eth_getTransactionCount", [address, "latest"])), attempts, baseDelayMs),
-        withRetry(async () => BigInt(await callRpc(chain, "eth_getBalance", [address, "latest"])), attempts, baseDelayMs),
+        withRetry(async () => parseEthereumQuantity(await callRpc(chain, "eth_getTransactionCount", [address, "latest"])), attempts, baseDelayMs),
+        withRetry(async () => parseEthereumQuantity(await callRpc(chain, "eth_getBalance", [address, "latest"])), attempts, baseDelayMs),
       ]);
       if ((nonce.status === "fulfilled" && nonce.value > 0n) || (balance.status === "fulfilled" && balance.value > 0n)) {
         used.set(address, [...(used.get(address) ?? []), chain.name]);
