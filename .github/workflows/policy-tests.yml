@@ -21,7 +21,17 @@ jobs:
       - name: Install verified Gitleaks
         run: scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks"
 
+      - name: Set up trusted Node runtime
+        uses: actions/setup-node@0a44ba7841725637a19e28fa30b79a866c81b0a6 # v4.0.4
+        with:
+          node-version: 22
+
+      - name: Install pinned liveness dependencies
+        run: npm ci --ignore-scripts --prefix scripts/evm-key-liveness
+
       - name: Run scanner regression tests
         env:
           GITLEAKS_BIN: ${{ runner.temp }}/gitleaks/gitleaks
-        run: tests/run.sh
+        run: |
+          tests/run.sh
+          node --test scripts/evm-key-liveness/scan.test.mjs

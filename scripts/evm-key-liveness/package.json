@@ -1,0 +1,11 @@
+{
+  "name": "@vana/evm-key-liveness",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Apache-2.0 advisory EVM liveness enrichment for the central Gitleaks policy",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "ethers": "6.17.0"
+  }
+}
