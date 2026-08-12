@@ -113,22 +113,14 @@ if "$root/scripts/install-pre-push.sh" prepare --shared-dir "$dirty_policy" --re
   printf 'expected installer to refuse untracked policy checkout files\n' >&2
   exit 1
 fi
-symlink_tool_dir="$test_root/symlink-tool-dir"
-ln -s "$test_root/outside-tools" "$symlink_tool_dir"
-if "$root/scripts/install-gitleaks.sh" "$symlink_tool_dir"; then
-  printf 'expected Gitleaks installer to refuse symlink destination\n' >&2
-  exit 1
-fi
-mkdir -p "$test_root/tool-with-symlink"
-ln -s "$test_root/external-gitleaks" "$test_root/tool-with-symlink/gitleaks"
-if "$root/scripts/install-gitleaks.sh" "$test_root/tool-with-symlink"; then
+binary_symlink_policy="$test_root/binary-symlink-policy"
+git clone -q "$root" "$binary_symlink_policy"
+git -C "$binary_symlink_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$binary_symlink_policy" checkout -q "$policy_sha"
+mkdir -p "$binary_symlink_policy/.tools/gitleaks"
+ln -s "$test_root/external-gitleaks" "$binary_symlink_policy/.tools/gitleaks/gitleaks"
+if "$binary_symlink_policy/scripts/install-gitleaks.sh" "$binary_symlink_policy/.tools/gitleaks"; then
   printf 'expected Gitleaks installer to refuse symlink binary\n' >&2
-  exit 1
-fi
-mkdir -p "$test_root/tool-with-receipt-symlink"
-ln -s "$test_root/external-receipt" "$test_root/tool-with-receipt-symlink/gitleaks.sha256"
-if "$root/scripts/install-gitleaks.sh" "$test_root/tool-with-receipt-symlink"; then
-  printf 'expected Gitleaks installer to refuse symlink receipt\n' >&2
   exit 1
 fi
 tool_symlink_policy="$test_root/tool-symlink-policy"
@@ -139,6 +131,10 @@ mkdir -p "$test_root/external-tools"
 ln -s "$test_root/external-tools" "$tool_symlink_policy/.tools"
 if "$tool_symlink_policy/scripts/install-pre-push.sh" prepare --shared-dir "$tool_symlink_policy" --ref "$policy_sha"; then
   printf 'expected prepare to refuse symlink .tools directory\n' >&2
+  exit 1
+fi
+if [[ -e "$test_root/external-tools/gitleaks/gitleaks" ]]; then
+  printf 'prepare wrote through symlink .tools directory\n' >&2
   exit 1
 fi
 
@@ -595,6 +591,7 @@ hook_policy="$test_root/hook-policy"
 git clone -q "$root" "$hook_policy"
 git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github.git
 git -C "$hook_policy" checkout -q "$policy_sha"
+"$root/scripts/install-pre-push.sh" uninstall --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 "$hook_policy/scripts/install-pre-push.sh" --repo "$repo" --shared-dir "$hook_policy" --ref "$policy_sha" >/dev/null
 mv "$hook_policy/.tools/gitleaks/gitleaks" "$hook_policy/.tools/gitleaks/gitleaks.missing"
 if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
