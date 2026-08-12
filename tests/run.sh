@@ -612,6 +612,7 @@ if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0
   printf 'expected pre-push hook to fail closed when Gitleaks is tampered\n' >&2
   exit 1
 fi
+"$hook_policy/scripts/install-pre-push.sh" uninstall --repo "$repo" --shared-dir "$hook_policy" --ref "$policy_sha" >/dev/null
 "$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 
 # A new branch based on already published history scans only its new commits.
