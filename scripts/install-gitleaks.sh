@@ -36,6 +36,16 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
+script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+parent=$(dirname "$destination")
+parent_real=$(cd "$parent" 2>/dev/null && pwd -P) || {
+  printf 'Tool directory parent does not exist: %s\n' "$parent" >&2
+  exit 2
+}
+case "$parent_real/" in
+  "$script_root/"*) ;;
+  *) printf 'Refusing tool directory outside policy checkout: %s\n' "$destination" >&2; exit 2 ;;
+esac
 [[ ! -L "$destination" ]] || { printf 'Refusing symlink destination: %s\n' "$destination" >&2; exit 2; }
 [[ ! -L "$destination/gitleaks" ]] || { printf 'Refusing symlink Gitleaks binary: %s\n' "$destination/gitleaks" >&2; exit 2; }
 [[ ! -L "$destination/gitleaks.sha256" ]] || { printf 'Refusing symlink Gitleaks receipt: %s\n' "$destination/gitleaks.sha256" >&2; exit 2; }

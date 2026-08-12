@@ -80,30 +80,18 @@ if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref 00000000
   exit 1
 fi
 bad_origin="$test_root/bad-origin"
-git init -q -b main "$bad_origin"
-mkdir -p "$bad_origin/hooks"
-cp "$root/hooks/pre-push" "$bad_origin/hooks/pre-push"
-chmod 0755 "$bad_origin/hooks/pre-push"
-git -C "$bad_origin" config user.name test
-git -C "$bad_origin" config user.email test@example.invalid
-git -C "$bad_origin" remote add origin https://example.invalid/not-vana.git
-git -C "$bad_origin" add hooks/pre-push
-git -C "$bad_origin" commit -q -m policy
+git clone -q "$root" "$bad_origin"
+git -C "$bad_origin" remote set-url origin https://example.invalid/not-vana.git
+git -C "$bad_origin" checkout -q "$policy_sha"
 bad_origin_sha=$(git -C "$bad_origin" rev-parse HEAD)
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --shared-dir "$bad_origin" --ref "$bad_origin_sha"; then
   printf 'expected installer to refuse wrong policy origin\n' >&2
   exit 1
 fi
 dirty_policy="$test_root/dirty-policy"
-git init -q -b main "$dirty_policy"
-mkdir -p "$dirty_policy/hooks"
-cp "$root/hooks/pre-push" "$dirty_policy/hooks/pre-push"
-chmod 0755 "$dirty_policy/hooks/pre-push"
-git -C "$dirty_policy" config user.name test
-git -C "$dirty_policy" config user.email test@example.invalid
-git -C "$dirty_policy" remote add origin https://github.com/vana-com/.github.git
-git -C "$dirty_policy" add hooks/pre-push
-git -C "$dirty_policy" commit -q -m policy
+git clone -q "$root" "$dirty_policy"
+git -C "$dirty_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$dirty_policy" checkout -q "$policy_sha"
 dirty_sha=$(git -C "$dirty_policy" rev-parse HEAD)
 printf '\n# dirty\n' >>"$dirty_policy/hooks/pre-push"
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --shared-dir "$dirty_policy" --ref "$dirty_sha"; then
@@ -138,6 +126,7 @@ tool_symlink_policy="$test_root/tool-symlink-policy"
 git clone -q "$root" "$tool_symlink_policy"
 git -C "$tool_symlink_policy" remote set-url origin https://github.com/vana-com/.github.git
 git -C "$tool_symlink_policy" checkout -q "$policy_sha"
+mkdir -p "$test_root/external-tools"
 ln -s "$test_root/external-tools" "$tool_symlink_policy/.tools"
 if "$tool_symlink_policy/scripts/install-pre-push.sh" prepare --shared-dir "$tool_symlink_policy" --ref "$policy_sha"; then
   printf 'expected prepare to refuse symlink .tools directory\n' >&2

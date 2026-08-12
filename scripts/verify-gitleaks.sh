@@ -9,6 +9,16 @@ usage() {
 
 [[ $# -eq 1 ]] || usage
 tool_dir=$1
+script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+parent=$(dirname "$tool_dir")
+parent_real=$(cd "$parent" 2>/dev/null && pwd -P) || {
+  printf 'Tool directory parent does not exist: %s\n' "$parent" >&2
+  exit 2
+}
+case "$parent_real/" in
+  "$script_root/"*) ;;
+  *) printf 'Refusing tool directory outside policy checkout: %s\n' "$tool_dir" >&2; exit 2 ;;
+esac
 [[ ! -L "$tool_dir" ]] || { printf 'Refusing symlink tool directory: %s\n' "$tool_dir" >&2; exit 2; }
 binary="$tool_dir/gitleaks"
 [[ ! -L "$binary" ]] || { printf 'Refusing symlink Gitleaks binary: %s\n' "$binary" >&2; exit 2; }
