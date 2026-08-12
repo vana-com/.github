@@ -77,11 +77,12 @@ scripts/install-pre-push.sh --repo /path/to/public-repo --ref <released-commit-s
 ```
 
 The installer requires the selected checkout to come from `vana-com/.github`,
-match the exact release SHA, and have no local changes. It downloads the pinned
-Gitleaks binary during install, stores a checksum receipt, and records the
-selected policy checkout in a managed launcher. No shell environment setup is
-required. Re-running the command updates the managed launcher for the same
-repository. Use `status` to inspect it and `uninstall` to remove it.
+match the exact release SHA, and have no local changes. It installs the pinned
+Gitleaks binary when the local copy is missing or fails checksum verification,
+then records the selected policy checkout in a managed launcher. No shell
+environment setup is required. Re-running the command updates the managed
+launcher for the same repository. Use `status` to inspect it and `uninstall` to
+remove it.
 
 The installer refuses to overwrite or remove an unmanaged hook. Use a hook
 manager or merge the launcher deliberately when another pre-push hook already
@@ -89,10 +90,11 @@ exists.
 
 The hook verifies the policy checkout SHA, verifies that the checkout has no
 local changes, and verifies the Gitleaks binary checksum before each push. It
-runs offline after installation and sends no source or candidate values over the
-network. For a new remote branch, it scans only commits not reachable from
-locally fetched `refs/remotes/<remote>` tips; run `git fetch <remote>` first if
-those refs may be stale.
+does not download tools during `git push`; if the tool or checksum receipt is
+missing, it fails closed and asks the developer to re-run the installer. It
+sends no source or candidate values over the network. For a new remote branch,
+it scans only commits not reachable from locally fetched `refs/remotes/<remote>`
+tips; run `git fetch <remote>` first if those refs may be stale.
 
 ## False positives and remediation
 

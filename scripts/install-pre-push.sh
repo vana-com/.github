@@ -72,9 +72,9 @@ hooks_dir=$(git -C "$repo" rev-parse --git-path hooks)
 [[ "$hooks_dir" = /* ]] || hooks_dir="$repo/$hooks_dir"
 hook="$hooks_dir/pre-push"
 marker='VANA_MANAGED_EVM_KEYSCAN_PRE_PUSH=1'
-is_managed=0
-if [[ -f "$hook" ]] && grep -qF "$marker" "$hook"; then
-  is_managed=1
+if [[ -L "$hook" ]]; then
+  printf 'Refusing to manage symlink hook: %s\n' "$hook" >&2
+  exit 2
 fi
 desired_hook=$(mktemp)
 trap 'rm -f "$desired_hook" "${tmp_hook:-}"' EXIT
@@ -85,10 +85,25 @@ readonly VANA_SECRET_SCAN_HOME=$(printf '%q' "$shared_dir")
 readonly VANA_SECRET_SCAN_EXPECTED_SHA=$(printf '%q' "$expected_sha")
 exec env VANA_SECRET_SCAN_HOME="\$VANA_SECRET_SCAN_HOME" VANA_SECRET_SCAN_EXPECTED_SHA="\$VANA_SECRET_SCAN_EXPECTED_SHA" $(printf '%q' "$shared_dir/hooks/pre-push") "\$@"
 EOF
+is_exact_managed=0
+if [[ -f "$hook" ]] && cmp -s "$desired_hook" "$hook"; then
+  is_exact_managed=1
+fi
+
+verify_installed_gitleaks() {
+  local binary="$shared_dir/.tools/gitleaks/gitleaks"
+  local receipt="$shared_dir/.tools/gitleaks/gitleaks.sha256"
+  [[ -x "$binary" && -f "$receipt" ]] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum --check --status "$receipt"
+  else
+    shasum -a 256 --check --status "$receipt"
+  fi
+}
 
 case "$command_name" in
   status)
-    if [[ $is_managed -eq 1 ]]; then
+    if [[ $is_exact_managed -eq 1 ]]; then
       printf 'Vana EVM keyscan pre-push hook is installed at %s\n' "$hook"
     elif [[ -e "$hook" ]]; then
       printf 'A non-Vana pre-push hook exists at %s\n' "$hook"
@@ -100,7 +115,7 @@ case "$command_name" in
     exit 0
     ;;
   uninstall)
-    if [[ $is_managed -eq 1 ]] && cmp -s "$desired_hook" "$hook"; then
+    if [[ $is_exact_managed -eq 1 ]]; then
       rm "$hook"
       printf 'Removed Vana EVM keyscan pre-push hook at %s\n' "$hook"
       exit 0
@@ -114,12 +129,14 @@ case "$command_name" in
     ;;
 esac
 
-if [[ -e "$hook" && $is_managed -ne 1 ]]; then
+if [[ -e "$hook" && $is_exact_managed -ne 1 ]]; then
   printf 'Refusing to overwrite existing hook: %s\nMerge it manually or use your hook manager.\n' "$hook" >&2
   exit 2
 fi
 
-"$shared_dir/scripts/install-gitleaks.sh" "$shared_dir/.tools/gitleaks" >/dev/null
+if ! verify_installed_gitleaks; then
+  "$shared_dir/scripts/install-gitleaks.sh" "$shared_dir/.tools/gitleaks" >/dev/null
+fi
 mkdir -p "$hooks_dir"
 tmp_hook=$(mktemp "$hooks_dir/pre-push.vana.XXXXXX")
 cp "$desired_hook" "$tmp_hook"

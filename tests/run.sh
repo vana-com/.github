@@ -38,6 +38,63 @@ if "$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"; 
   printf 'expected installer to refuse unmanaged hook\n' >&2
   exit 1
 fi
+printf '#!/usr/bin/env bash\n# VANA_MANAGED_EVM_KEYSCAN_PRE_PUSH=1\nexit 0\n' >"$hook_path"
+chmod 0755 "$hook_path"
+if "$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"; then
+  printf 'expected installer to refuse marker-spoofed hook\n' >&2
+  exit 1
+fi
+rm "$hook_path"
+ln -s /dev/null "$hook_path"
+if "$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"; then
+  printf 'expected installer to refuse symlink hook\n' >&2
+  exit 1
+fi
+
+custom_hook_repo="$test_root/custom-hook-repo"
+git init -q -b main "$custom_hook_repo"
+git -C "$custom_hook_repo" config core.hooksPath custom-hooks
+"$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref "$policy_sha"
+if [[ ! -f "$custom_hook_repo/custom-hooks/pre-push" ]]; then
+  printf 'expected installer to honor custom core.hooksPath\n' >&2
+  exit 1
+fi
+
+if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref 0000000000000000000000000000000000000000; then
+  printf 'expected installer to refuse wrong policy SHA\n' >&2
+  exit 1
+fi
+bad_origin="$test_root/bad-origin"
+git init -q -b main "$bad_origin"
+mkdir -p "$bad_origin/hooks"
+cp "$root/hooks/pre-push" "$bad_origin/hooks/pre-push"
+chmod 0755 "$bad_origin/hooks/pre-push"
+git -C "$bad_origin" config user.name test
+git -C "$bad_origin" config user.email test@example.invalid
+git -C "$bad_origin" remote add origin https://example.invalid/not-vana.git
+git -C "$bad_origin" add hooks/pre-push
+git -C "$bad_origin" commit -q -m policy
+bad_origin_sha=$(git -C "$bad_origin" rev-parse HEAD)
+if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --shared-dir "$bad_origin" --ref "$bad_origin_sha"; then
+  printf 'expected installer to refuse wrong policy origin\n' >&2
+  exit 1
+fi
+dirty_policy="$test_root/dirty-policy"
+git init -q -b main "$dirty_policy"
+mkdir -p "$dirty_policy/hooks"
+cp "$root/hooks/pre-push" "$dirty_policy/hooks/pre-push"
+chmod 0755 "$dirty_policy/hooks/pre-push"
+git -C "$dirty_policy" config user.name test
+git -C "$dirty_policy" config user.email test@example.invalid
+git -C "$dirty_policy" remote add origin https://github.com/vana-com/.github.git
+git -C "$dirty_policy" add hooks/pre-push
+git -C "$dirty_policy" commit -q -m policy
+dirty_sha=$(git -C "$dirty_policy" rev-parse HEAD)
+printf '\n# dirty\n' >>"$dirty_policy/hooks/pre-push"
+if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --shared-dir "$dirty_policy" --ref "$dirty_sha"; then
+  printf 'expected installer to refuse dirty policy checkout\n' >&2
+  exit 1
+fi
 
 key='4f3c8b1a9e6d2c7f0b5e1d8a6c3f9b2e''7d4a1c8f5b0e6d3a9c2f7b4e1d8a6c3f'
 scan() { "$scanner" --repo "$repo" --range "$1" --config "$config" --gitleaks "$gitleaks"; }
@@ -487,6 +544,29 @@ if grep -Fq "$key" "$hook_output"; then
   printf 'pre-push hook exposed a candidate value\n' >&2
   exit 1
 fi
+
+gitleaks_bin="$root/.tools/gitleaks/gitleaks"
+gitleaks_backup="$test_root/gitleaks.backup"
+gitleaks_receipt="$root/.tools/gitleaks/gitleaks.sha256"
+gitleaks_receipt_backup="$test_root/gitleaks.sha256.backup"
+cp "$gitleaks_bin" "$gitleaks_backup"
+cp "$gitleaks_receipt" "$gitleaks_receipt_backup"
+mv "$gitleaks_bin" "$gitleaks_bin.missing"
+if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
+    .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
+  printf 'expected pre-push hook to fail closed when Gitleaks is missing\n' >&2
+  exit 1
+fi
+mv "$gitleaks_bin.missing" "$gitleaks_bin"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$gitleaks_bin"
+chmod 0755 "$gitleaks_bin"
+if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
+    .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
+  printf 'expected pre-push hook to fail closed when Gitleaks is tampered\n' >&2
+  exit 1
+fi
+cp "$gitleaks_backup" "$gitleaks_bin"
+cp "$gitleaks_receipt_backup" "$gitleaks_receipt"
 
 # A new branch based on already published history scans only its new commits.
 new_branch=$(commit_file new-branch.ts 'export const release = true;' new-branch)

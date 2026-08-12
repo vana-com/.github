@@ -15,8 +15,7 @@ if [[ -z "$expected_sha" || ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 scanner="$shared_dir/scripts/scan-commit-range.sh"
-installer="$shared_dir/scripts/install-gitleaks.sh"
-[[ -x "$scanner" && -x "$installer" ]] || {
+[[ -x "$scanner" ]] || {
   printf 'VANA_SECRET_SCAN_HOME is not a valid shared scanner checkout.\n' >&2
   exit 2
 }
@@ -37,11 +36,12 @@ git -C "$shared_dir" diff --quiet -- . && git -C "$shared_dir" diff --cached --q
 
 tool_dir="$shared_dir/.tools/gitleaks"
 if [[ ! -x "$tool_dir/gitleaks" ]]; then
-  "$installer" "$tool_dir"
+  printf 'Gitleaks is not installed for the Vana pre-push hook. Re-run scripts/install-pre-push.sh from the pinned policy checkout.\n' >&2
+  exit 2
 fi
 if [[ ! -f "$tool_dir/gitleaks.sha256" ]]; then
-  printf 'Gitleaks checksum receipt missing; reinstalling pinned Gitleaks.\n' >&2
-  "$installer" "$tool_dir"
+  printf 'Gitleaks checksum receipt is missing. Re-run scripts/install-pre-push.sh from the pinned policy checkout.\n' >&2
+  exit 2
 fi
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum --check --status "$tool_dir/gitleaks.sha256"
