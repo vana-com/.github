@@ -27,7 +27,7 @@ if [[ "$actual_sha" != "$expected_sha" ]]; then
 fi
 origin_url=$(git -C "$shared_dir" config --get remote.origin.url || true)
 case "$origin_url" in
-  git@github.com:vana-com/.github.git|https://github.com/vana-com/.github.git) ;;
+  git@github.com:vana-com/.github|git@github.com:vana-com/.github.git|https://github.com/vana-com/.github|https://github.com/vana-com/.github.git) ;;
   *) printf 'Vana scanner checkout origin is not vana-com/.github: %s\n' "${origin_url:-<unset>}" >&2; exit 2 ;;
 esac
 git -C "$shared_dir" diff --quiet -- . && git -C "$shared_dir" diff --cached --quiet -- . || {

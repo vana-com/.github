@@ -60,7 +60,7 @@ actual_sha=$(git -C "$shared_dir" rev-parse HEAD)
 }
 origin_url=$(git -C "$shared_dir" config --get remote.origin.url || true)
 case "$origin_url" in
-  git@github.com:vana-com/.github.git|https://github.com/vana-com/.github.git) ;;
+  git@github.com:vana-com/.github|git@github.com:vana-com/.github.git|https://github.com/vana-com/.github|https://github.com/vana-com/.github.git) ;;
   *) printf 'Policy checkout origin is not vana-com/.github: %s\n' "${origin_url:-<unset>}" >&2; exit 2 ;;
 esac
 if [[ -n "$(git -C "$shared_dir" status --porcelain --untracked-files=all -- ':!/.tools')" ]]; then

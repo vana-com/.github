@@ -76,13 +76,19 @@ mkdir "$not_a_repo"
 "$root/scripts/install-pre-push.sh" prepare --repo "$not_a_repo" --ref "$policy_sha"
 fresh_policy="$test_root/fresh-policy"
 git clone -q "$root" "$fresh_policy"
-git -C "$fresh_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$fresh_policy" remote set-url origin https://github.com/vana-com/.github
 git -C "$fresh_policy" checkout -q "$policy_sha"
 "$fresh_policy/scripts/install-pre-push.sh" prepare --shared-dir "$fresh_policy" --ref "$policy_sha"
 if [[ ! -x "$fresh_policy/.tools/gitleaks/gitleaks" ]]; then
   printf 'expected prepare to install Gitleaks in a fresh policy clone\n' >&2
   exit 1
 fi
+git -C "$fresh_policy" remote set-url origin https://github.com/vana-com/.github-lookalike
+if "$fresh_policy/scripts/install-pre-push.sh" prepare --shared-dir "$fresh_policy" --ref "$policy_sha"; then
+  printf 'expected installer to reject lookalike policy origin\n' >&2
+  exit 1
+fi
+git -C "$fresh_policy" remote set-url origin https://github.com/vana-com/.github
 relative_policy="$test_root/relative-policy"
 git clone -q "$root" "$relative_policy"
 git -C "$relative_policy" remote set-url origin https://github.com/vana-com/.github.git
@@ -602,6 +608,19 @@ git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github.
 git -C "$hook_policy" checkout -q "$policy_sha"
 "$root/scripts/install-pre-push.sh" uninstall --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 "$hook_policy/scripts/install-pre-push.sh" --repo "$repo" --shared-dir "$hook_policy" --ref "$policy_sha" >/dev/null
+git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github
+if ! (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
+    .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
+  printf 'expected pre-push hook to accept GitHub origin without .git suffix\n' >&2
+  exit 1
+fi
+git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github-lookalike
+if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
+    .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
+  printf 'expected pre-push hook to reject lookalike policy origin\n' >&2
+  exit 1
+fi
+git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github.git
 mv "$hook_policy/.tools/gitleaks/gitleaks" "$hook_policy/.tools/gitleaks/gitleaks.missing"
 if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
     .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
