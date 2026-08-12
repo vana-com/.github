@@ -5,6 +5,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 scanner="$root/scripts/scan-commit-range.sh"
 config="$root/.gitleaks.toml"
 gitleaks=${GITLEAKS_BIN:-gitleaks}
+policy_sha=$(git -C "$root" rev-parse HEAD)
 
 command -v "$gitleaks" >/dev/null 2>&1 || {
   printf 'Set GITLEAKS_BIN to a Gitleaks executable.\n' >&2
@@ -17,6 +18,26 @@ repo="$test_root/repo"
 git init -q -b main "$repo"
 git -C "$repo" config user.name test
 git -C "$repo" config user.email test@example.invalid
+
+hook_repo="$test_root/hook-repo"
+git init -q -b main "$hook_repo"
+"$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"
+"$root/scripts/install-pre-push.sh" status --repo "$hook_repo" --ref "$policy_sha"
+hook_path=$(git -C "$hook_repo" rev-parse --git-path hooks/pre-push)
+[[ "$hook_path" = /* ]] || hook_path="$hook_repo/$hook_path"
+grep -qF 'VANA_MANAGED_EVM_KEYSCAN_PRE_PUSH=1' "$hook_path"
+"$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"
+"$root/scripts/install-pre-push.sh" uninstall --repo "$hook_repo" --ref "$policy_sha"
+if "$root/scripts/install-pre-push.sh" status --repo "$hook_repo" --ref "$policy_sha"; then
+  printf 'expected status to fail after uninstall\n' >&2
+  exit 1
+fi
+printf '#!/usr/bin/env bash\nexit 0\n' >"$hook_path"
+chmod 0755 "$hook_path"
+if "$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"; then
+  printf 'expected installer to refuse unmanaged hook\n' >&2
+  exit 1
+fi
 
 key='4f3c8b1a9e6d2c7f0b5e1d8a6c3f9b2e''7d4a1c8f5b0e6d3a9c2f7b4e1d8a6c3f'
 scan() { "$scanner" --repo "$repo" --range "$1" --config "$config" --gitleaks "$gitleaks"; }
@@ -455,7 +476,7 @@ fi
 
 # The optional hook should inherit the trusted checkout selected by its
 # installer and must not print the candidate value when it blocks a push.
-"$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" >/dev/null
+"$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 hook_output="$test_root/hook-output"
 if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$allowed" 0 |
     .git/hooks/pre-push origin example.invalid) >"$hook_output" 2>&1; then
@@ -475,10 +496,7 @@ if ! (cd "$repo" && printf 'refs/heads/new %s refs/heads/new %040d\n' "$new_bran
   printf 'expected new branch to exclude existing remote history\n' >&2
   exit 1
 fi
-if "$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" >/dev/null 2>&1; then
-  printf 'expected installer to refuse an existing hook\n' >&2
-  exit 1
-fi
+"$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 
 git -C "$repo" commit --allow-empty -q -m "privateKey=$key"
 message_commit=$(git -C "$repo" rev-parse HEAD)

@@ -50,4 +50,9 @@ else
 fi
 tar -xzf "$archive" -C "$workdir" gitleaks
 install -m 0755 "$workdir/gitleaks" "$destination/gitleaks"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$destination/gitleaks" >"$destination/gitleaks.sha256"
+else
+  shasum -a 256 "$destination/gitleaks" >"$destination/gitleaks.sha256"
+fi
 "$destination/gitleaks" version >&2
