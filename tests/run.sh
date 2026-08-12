@@ -83,6 +83,15 @@ if [[ ! -x "$fresh_policy/.tools/gitleaks/gitleaks" ]]; then
   printf 'expected prepare to install Gitleaks in a fresh policy clone\n' >&2
   exit 1
 fi
+relative_policy="$test_root/relative-policy"
+git clone -q "$root" "$relative_policy"
+git -C "$relative_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$relative_policy" checkout -q "$policy_sha"
+(cd "$relative_policy" && scripts/install-gitleaks.sh .tools/gitleaks)
+if [[ ! -x "$relative_policy/.tools/gitleaks/gitleaks" ]]; then
+  printf 'expected relative Gitleaks install destination to work\n' >&2
+  exit 1
+fi
 
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref 0000000000000000000000000000000000000000; then
   printf 'expected installer to refuse wrong policy SHA\n' >&2
@@ -119,7 +128,7 @@ git -C "$binary_symlink_policy" remote set-url origin https://github.com/vana-co
 git -C "$binary_symlink_policy" checkout -q "$policy_sha"
 mkdir -p "$binary_symlink_policy/.tools/gitleaks"
 ln -s "$test_root/external-gitleaks" "$binary_symlink_policy/.tools/gitleaks/gitleaks"
-if "$binary_symlink_policy/scripts/install-gitleaks.sh" "$binary_symlink_policy/.tools/gitleaks"; then
+if "$binary_symlink_policy/scripts/install-gitleaks.sh"; then
   printf 'expected Gitleaks installer to refuse symlink binary\n' >&2
   exit 1
 fi

@@ -11,7 +11,8 @@ usage() {
 }
 
 [[ $# -le 1 ]] || usage
-destination=${1:-"$PWD/.tools/gitleaks"}
+script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+destination=${1:-"$script_root/.tools/gitleaks"}
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
@@ -36,21 +37,22 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
-script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-expected_destination="$script_root/.tools/gitleaks"
-[[ "$destination" == "$expected_destination" ]] || {
-  printf 'Refusing unexpected tool directory: %s\n' "$destination" >&2
-  exit 2
-}
-tools_root="$script_root/.tools"
-[[ ! -L "$tools_root" ]] || { printf 'Refusing symlink tools directory: %s\n' "$tools_root" >&2; exit 2; }
-mkdir -p "$tools_root"
-tools_root_real=$(cd "$tools_root" && pwd -P)
-[[ "$tools_root_real" == "$tools_root" ]] || {
-  printf 'Refusing tools directory outside policy checkout: %s\n' "$tools_root" >&2
-  exit 2
-}
+parent=$(dirname "$destination")
+[[ ! -L "$parent" ]] || { printf 'Refusing symlink tool parent directory: %s\n' "$parent" >&2; exit 2; }
+mkdir -p "$parent"
+parent_real=$(cd "$parent" && pwd -P)
+destination="$parent_real/$(basename "$destination")"
 [[ ! -L "$destination" ]] || { printf 'Refusing symlink destination: %s\n' "$destination" >&2; exit 2; }
+if [[ "$destination" == "$script_root/.tools/gitleaks" ]]; then
+  case "$destination/" in
+    "$script_root/"*) ;;
+    *) printf 'Refusing default tool directory outside policy checkout: %s\n' "$destination" >&2; exit 2 ;;
+  esac
+fi
+if [[ -e "$destination" && ! -d "$destination" ]]; then
+  printf 'Refusing non-directory destination: %s\n' "$destination" >&2
+  exit 2
+fi
 [[ ! -L "$destination/gitleaks" ]] || { printf 'Refusing symlink Gitleaks binary: %s\n' "$destination/gitleaks" >&2; exit 2; }
 [[ ! -L "$destination/gitleaks.sha256" ]] || { printf 'Refusing symlink Gitleaks receipt: %s\n' "$destination/gitleaks.sha256" >&2; exit 2; }
 mkdir -p "$destination"
