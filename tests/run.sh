@@ -74,6 +74,15 @@ fi
 not_a_repo="$test_root/not-a-repo"
 mkdir "$not_a_repo"
 "$root/scripts/install-pre-push.sh" prepare --repo "$not_a_repo" --ref "$policy_sha"
+fresh_policy="$test_root/fresh-policy"
+git clone -q "$root" "$fresh_policy"
+git -C "$fresh_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$fresh_policy" checkout -q "$policy_sha"
+"$fresh_policy/scripts/install-pre-push.sh" prepare --shared-dir "$fresh_policy" --ref "$policy_sha"
+if [[ ! -x "$fresh_policy/.tools/gitleaks/gitleaks" ]]; then
+  printf 'expected prepare to install Gitleaks in a fresh policy clone\n' >&2
+  exit 1
+fi
 
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref 0000000000000000000000000000000000000000; then
   printf 'expected installer to refuse wrong policy SHA\n' >&2
