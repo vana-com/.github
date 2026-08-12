@@ -4,15 +4,16 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<USAGE
-Usage: ${0##*/} [install|status|uninstall] [options]
+Usage: ${0##*/} [install|prepare|status|uninstall] [options]
 
 Options:
   --repo <repository>       Git repository to manage (default: current directory)
   --shared-dir <checkout>   Trusted vana-com/.github checkout (default: this checkout)
   --ref <sha>              Required 40-character policy commit
 
-The installer writes only a small managed launcher. It refuses to overwrite an
-unmanaged pre-push hook.
+The install command writes only a small managed launcher. The prepare command
+validates the policy checkout and installs the pinned Gitleaks binary without
+touching repository hooks.
 USAGE
   exit 2
 }
@@ -29,26 +30,29 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) repo=${2:-}; shift 2 ;;
     --shared-dir) shared_dir=${2:-}; shift 2 ;;
-    --ref|--expected-sha) expected_sha=${2:-}; shift 2 ;;
+    --ref) expected_sha=${2:-}; shift 2 ;;
     --help|-h) usage ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
   esac
 done
 case "$command_name" in
-  install|status|uninstall) ;;
+  install|prepare|status|uninstall) ;;
   *) printf 'Unknown command: %s\n' "$command_name" >&2; usage ;;
 esac
-git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'Not a Git work tree: %s\n' "$repo" >&2; exit 2; }
-repo=$(cd "$repo" && pwd -P)
-[[ -x "$shared_dir/hooks/pre-push" ]] || { printf 'No hook at: %s/hooks/pre-push\n' "$shared_dir" >&2; exit 2; }
-shared_dir=$(cd "$shared_dir" && pwd -P)
-if [[ -z "$expected_sha" ]]; then
-  expected_sha=$(git -C "$shared_dir" rev-parse HEAD)
-fi
+[[ -n "$expected_sha" ]] || { printf 'Missing required --ref <released-commit-sha>.\n' >&2; exit 2; }
 [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]] || {
-  printf 'Expected policy SHA must be a 40-character lowercase commit ID.\n' >&2
+  printf 'Policy ref must be a 40-character lowercase commit ID.\n' >&2
   exit 2
 }
+
+git -C "$shared_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  printf 'Policy checkout is not a Git work tree: %s\n' "$shared_dir" >&2
+  exit 2
+}
+[[ -x "$shared_dir/hooks/pre-push" ]] || { printf 'No hook at: %s/hooks/pre-push\n' "$shared_dir" >&2; exit 2; }
+[[ -x "$shared_dir/scripts/install-gitleaks.sh" ]] || { printf 'No installer at: %s/scripts/install-gitleaks.sh\n' "$shared_dir" >&2; exit 2; }
+[[ -x "$shared_dir/scripts/verify-gitleaks.sh" ]] || { printf 'No verifier at: %s/scripts/verify-gitleaks.sh\n' "$shared_dir" >&2; exit 2; }
+shared_dir=$(cd "$shared_dir" && pwd -P)
 actual_sha=$(git -C "$shared_dir" rev-parse HEAD)
 [[ "$actual_sha" == "$expected_sha" ]] || {
   printf 'Policy checkout is at %s, expected %s.\n' "$actual_sha" "$expected_sha" >&2
@@ -59,23 +63,63 @@ case "$origin_url" in
   git@github.com:vana-com/.github.git|https://github.com/vana-com/.github.git) ;;
   *) printf 'Policy checkout origin is not vana-com/.github: %s\n' "${origin_url:-<unset>}" >&2; exit 2 ;;
 esac
-git -C "$shared_dir" diff --quiet -- . || {
-  printf 'Policy checkout has unstaged changes: %s\n' "$shared_dir" >&2
-  exit 2
-}
-git -C "$shared_dir" diff --cached --quiet -- . || {
-  printf 'Policy checkout has staged changes: %s\n' "$shared_dir" >&2
-  exit 2
-}
-
-hooks_dir=$(git -C "$repo" rev-parse --git-path hooks)
-[[ "$hooks_dir" = /* ]] || hooks_dir="$repo/$hooks_dir"
-hook="$hooks_dir/pre-push"
-marker='VANA_MANAGED_EVM_KEYSCAN_PRE_PUSH=1'
-if [[ -L "$hook" ]]; then
-  printf 'Refusing to manage symlink hook: %s\n' "$hook" >&2
+if [[ -n "$(git -C "$shared_dir" status --porcelain --untracked-files=all -- ':!/.tools')" ]]; then
+  printf 'Policy checkout has local changes: %s\n' "$shared_dir" >&2
   exit 2
 fi
+
+tool_dir="$shared_dir/.tools/gitleaks"
+prepare_gitleaks() {
+  if ! "$shared_dir/scripts/verify-gitleaks.sh" "$tool_dir" >/dev/null 2>&1; then
+    "$shared_dir/scripts/install-gitleaks.sh" "$tool_dir" >/dev/null
+    "$shared_dir/scripts/verify-gitleaks.sh" "$tool_dir" >/dev/null
+  fi
+}
+
+if [[ "$command_name" == prepare ]]; then
+  prepare_gitleaks
+  printf 'Prepared Vana EVM keyscan policy checkout at %s\n' "$shared_dir"
+  exit 0
+fi
+
+git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'Not a Git work tree: %s\n' "$repo" >&2; exit 2; }
+repo=$(cd "$repo" && pwd -P)
+configured_hooks_path=$(git -C "$repo" config --get core.hooksPath || true)
+if [[ -n "$configured_hooks_path" ]]; then
+  printf 'Refusing to manage repositories with core.hooksPath set: %s\n' "$configured_hooks_path" >&2
+  exit 2
+fi
+hooks_dir=$(git -C "$repo" rev-parse --git-path hooks)
+[[ "$hooks_dir" != /* ]] || { printf 'Refusing absolute hooks directory: %s\n' "$hooks_dir" >&2; exit 2; }
+[[ "$hooks_dir" == .git/hooks ]] || { printf 'Refusing unexpected hooks directory: %s\n' "$hooks_dir" >&2; exit 2; }
+git_dir=$(git -C "$repo" rev-parse --git-dir)
+[[ "$git_dir" != /* ]] || { printf 'Refusing absolute Git directory: %s\n' "$git_dir" >&2; exit 2; }
+git_dir_real=$(cd "$repo/$(dirname "$git_dir")" && pwd -P)/$(basename "$git_dir")
+repo_real=$(cd "$repo" && pwd -P)
+case "$git_dir_real" in
+  "$repo_real/.git") ;;
+  *) printf 'Refusing Git directory outside repository: %s\n' "$git_dir_real" >&2; exit 2 ;;
+esac
+if [[ -e "$repo/.git" && -L "$repo/.git" ]]; then
+  printf 'Refusing symlink Git directory: %s\n' "$repo/.git" >&2
+  exit 2
+fi
+hooks_dir="$repo/.git/hooks"
+if [[ -e "$hooks_dir" && ! -d "$hooks_dir" ]]; then
+  printf 'Refusing non-directory hooks path: %s\n' "$hooks_dir" >&2
+  exit 2
+fi
+if [[ -L "$hooks_dir" ]]; then
+  printf 'Refusing symlink hooks directory: %s\n' "$hooks_dir" >&2
+  exit 2
+fi
+hook="$hooks_dir/pre-push"
+if [[ -L "$hook" ]]; then
+  printf 'Refusing symlink hook: %s\n' "$hook" >&2
+  exit 2
+fi
+
+marker='VANA_MANAGED_EVM_KEYSCAN_PRE_PUSH=1'
 desired_hook=$(mktemp)
 trap 'rm -f "$desired_hook" "${tmp_hook:-}"' EXIT
 cat >"$desired_hook" <<EOF
@@ -90,29 +134,19 @@ if [[ -f "$hook" ]] && cmp -s "$desired_hook" "$hook"; then
   is_exact_managed=1
 fi
 
-verify_installed_gitleaks() {
-  local binary="$shared_dir/.tools/gitleaks/gitleaks"
-  local receipt="$shared_dir/.tools/gitleaks/gitleaks.sha256"
-  [[ -x "$binary" && -f "$receipt" ]] || return 1
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum --check --status "$receipt"
-  else
-    shasum -a 256 --check --status "$receipt"
-  fi
-}
-
 case "$command_name" in
   status)
-    if [[ $is_exact_managed -eq 1 ]]; then
+    "$shared_dir/scripts/verify-gitleaks.sh" "$tool_dir" >/dev/null
+    if [[ $is_exact_managed -eq 1 && -x "$hook" ]]; then
       printf 'Vana EVM keyscan pre-push hook is installed at %s\n' "$hook"
-    elif [[ -e "$hook" ]]; then
-      printf 'A non-Vana pre-push hook exists at %s\n' "$hook"
-      exit 1
-    else
-      printf 'Vana EVM keyscan pre-push hook is not installed for %s\n' "$repo"
-      exit 1
+      exit 0
     fi
-    exit 0
+    if [[ -e "$hook" ]]; then
+      printf 'A non-Vana pre-push hook exists at %s\n' "$hook" >&2
+    else
+      printf 'Vana EVM keyscan pre-push hook is not installed for %s\n' "$repo" >&2
+    fi
+    exit 1
     ;;
   uninstall)
     if [[ $is_exact_managed -eq 1 ]]; then
@@ -134,9 +168,7 @@ if [[ -e "$hook" && $is_exact_managed -ne 1 ]]; then
   exit 2
 fi
 
-if ! verify_installed_gitleaks; then
-  "$shared_dir/scripts/install-gitleaks.sh" "$shared_dir/.tools/gitleaks" >/dev/null
-fi
+prepare_gitleaks
 mkdir -p "$hooks_dir"
 tmp_hook=$(mktemp "$hooks_dir/pre-push.vana.XXXXXX")
 cp "$desired_hook" "$tmp_hook"

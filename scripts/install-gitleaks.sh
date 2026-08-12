@@ -36,6 +36,9 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
+[[ ! -L "$destination" ]] || { printf 'Refusing symlink destination: %s\n' "$destination" >&2; exit 2; }
+[[ ! -L "$destination/gitleaks" ]] || { printf 'Refusing symlink Gitleaks binary: %s\n' "$destination/gitleaks" >&2; exit 2; }
+[[ ! -L "$destination/gitleaks.sha256" ]] || { printf 'Refusing symlink Gitleaks receipt: %s\n' "$destination/gitleaks.sha256" >&2; exit 2; }
 mkdir -p "$destination"
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
@@ -50,9 +53,4 @@ else
 fi
 tar -xzf "$archive" -C "$workdir" gitleaks
 install -m 0755 "$workdir/gitleaks" "$destination/gitleaks"
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "$destination/gitleaks" >"$destination/gitleaks.sha256"
-else
-  shasum -a 256 "$destination/gitleaks" >"$destination/gitleaks.sha256"
-fi
 "$destination/gitleaks" version >&2

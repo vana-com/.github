@@ -21,6 +21,10 @@ git -C "$repo" config user.email test@example.invalid
 
 hook_repo="$test_root/hook-repo"
 git init -q -b main "$hook_repo"
+if "$root/scripts/install-pre-push.sh" --repo "$hook_repo"; then
+  printf 'expected installer to require --ref\n' >&2
+  exit 1
+fi
 "$root/scripts/install-pre-push.sh" --repo "$hook_repo" --ref "$policy_sha"
 "$root/scripts/install-pre-push.sh" status --repo "$hook_repo" --ref "$policy_sha"
 hook_path=$(git -C "$hook_repo" rev-parse --git-path hooks/pre-push)
@@ -54,11 +58,22 @@ fi
 custom_hook_repo="$test_root/custom-hook-repo"
 git init -q -b main "$custom_hook_repo"
 git -C "$custom_hook_repo" config core.hooksPath custom-hooks
-"$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref "$policy_sha"
-if [[ ! -f "$custom_hook_repo/custom-hooks/pre-push" ]]; then
-  printf 'expected installer to honor custom core.hooksPath\n' >&2
+if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref "$policy_sha"; then
+  printf 'expected installer to refuse configured core.hooksPath\n' >&2
   exit 1
 fi
+if [[ -e "$custom_hook_repo/custom-hooks/pre-push" ]]; then
+  printf 'prepare-only repo should not receive a pre-push hook\n' >&2
+  exit 1
+fi
+"$root/scripts/install-pre-push.sh" prepare --repo "$custom_hook_repo" --ref "$policy_sha"
+if [[ -e "$custom_hook_repo/custom-hooks/pre-push" ]]; then
+  printf 'prepare should not touch repository hooks\n' >&2
+  exit 1
+fi
+not_a_repo="$test_root/not-a-repo"
+mkdir "$not_a_repo"
+"$root/scripts/install-pre-push.sh" prepare --repo "$not_a_repo" --ref "$policy_sha"
 
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --ref 0000000000000000000000000000000000000000; then
   printf 'expected installer to refuse wrong policy SHA\n' >&2
@@ -93,6 +108,39 @@ dirty_sha=$(git -C "$dirty_policy" rev-parse HEAD)
 printf '\n# dirty\n' >>"$dirty_policy/hooks/pre-push"
 if "$root/scripts/install-pre-push.sh" --repo "$custom_hook_repo" --shared-dir "$dirty_policy" --ref "$dirty_sha"; then
   printf 'expected installer to refuse dirty policy checkout\n' >&2
+  exit 1
+fi
+git -C "$dirty_policy" checkout -- hooks/pre-push
+printf 'untracked\n' >"$dirty_policy/untracked.txt"
+if "$root/scripts/install-pre-push.sh" prepare --shared-dir "$dirty_policy" --ref "$dirty_sha"; then
+  printf 'expected installer to refuse untracked policy checkout files\n' >&2
+  exit 1
+fi
+symlink_tool_dir="$test_root/symlink-tool-dir"
+ln -s "$test_root/outside-tools" "$symlink_tool_dir"
+if "$root/scripts/install-gitleaks.sh" "$symlink_tool_dir"; then
+  printf 'expected Gitleaks installer to refuse symlink destination\n' >&2
+  exit 1
+fi
+mkdir -p "$test_root/tool-with-symlink"
+ln -s "$test_root/external-gitleaks" "$test_root/tool-with-symlink/gitleaks"
+if "$root/scripts/install-gitleaks.sh" "$test_root/tool-with-symlink"; then
+  printf 'expected Gitleaks installer to refuse symlink binary\n' >&2
+  exit 1
+fi
+mkdir -p "$test_root/tool-with-receipt-symlink"
+ln -s "$test_root/external-receipt" "$test_root/tool-with-receipt-symlink/gitleaks.sha256"
+if "$root/scripts/install-gitleaks.sh" "$test_root/tool-with-receipt-symlink"; then
+  printf 'expected Gitleaks installer to refuse symlink receipt\n' >&2
+  exit 1
+fi
+tool_symlink_policy="$test_root/tool-symlink-policy"
+git clone -q "$root" "$tool_symlink_policy"
+git -C "$tool_symlink_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$tool_symlink_policy" checkout -q "$policy_sha"
+ln -s "$test_root/external-tools" "$tool_symlink_policy/.tools"
+if "$tool_symlink_policy/scripts/install-pre-push.sh" prepare --shared-dir "$tool_symlink_policy" --ref "$policy_sha"; then
+  printf 'expected prepare to refuse symlink .tools directory\n' >&2
   exit 1
 fi
 
@@ -545,28 +593,26 @@ if grep -Fq "$key" "$hook_output"; then
   exit 1
 fi
 
-gitleaks_bin="$root/.tools/gitleaks/gitleaks"
-gitleaks_backup="$test_root/gitleaks.backup"
-gitleaks_receipt="$root/.tools/gitleaks/gitleaks.sha256"
-gitleaks_receipt_backup="$test_root/gitleaks.sha256.backup"
-cp "$gitleaks_bin" "$gitleaks_backup"
-cp "$gitleaks_receipt" "$gitleaks_receipt_backup"
-mv "$gitleaks_bin" "$gitleaks_bin.missing"
+hook_policy="$test_root/hook-policy"
+git clone -q "$root" "$hook_policy"
+git -C "$hook_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$hook_policy" checkout -q "$policy_sha"
+"$hook_policy/scripts/install-pre-push.sh" --repo "$repo" --shared-dir "$hook_policy" --ref "$policy_sha" >/dev/null
+mv "$hook_policy/.tools/gitleaks/gitleaks" "$hook_policy/.tools/gitleaks/gitleaks.missing"
 if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
     .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
   printf 'expected pre-push hook to fail closed when Gitleaks is missing\n' >&2
   exit 1
 fi
-mv "$gitleaks_bin.missing" "$gitleaks_bin"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$gitleaks_bin"
-chmod 0755 "$gitleaks_bin"
+mv "$hook_policy/.tools/gitleaks/gitleaks.missing" "$hook_policy/.tools/gitleaks/gitleaks"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$hook_policy/.tools/gitleaks/gitleaks"
+chmod 0755 "$hook_policy/.tools/gitleaks/gitleaks"
 if (cd "$repo" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$clean" 0 |
     .git/hooks/pre-push origin example.invalid) >/dev/null 2>&1; then
   printf 'expected pre-push hook to fail closed when Gitleaks is tampered\n' >&2
   exit 1
 fi
-cp "$gitleaks_backup" "$gitleaks_bin"
-cp "$gitleaks_receipt_backup" "$gitleaks_receipt"
+"$root/scripts/install-pre-push.sh" --shared-dir "$root" --repo "$repo" --ref "$policy_sha" >/dev/null
 
 # A new branch based on already published history scans only its new commits.
 new_branch=$(commit_file new-branch.ts 'export const release = true;' new-branch)
