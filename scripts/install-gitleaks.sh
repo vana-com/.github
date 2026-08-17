@@ -62,10 +62,17 @@ trap 'rm -rf "$workdir"' EXIT
 archive="$workdir/$asset"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
   "$RELEASE_BASE/$asset" --output "$archive"
-if command -v sha256sum >/dev/null 2>&1; then
-  printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
-else
+# macOS ships its own /sbin/sha256sum ("sha256sum (Darwin) 1.0") which does NOT
+# accept the GNU long options below, so `command -v sha256sum` succeeds there
+# and this verification fails for every download regardless of authenticity —
+# the shasum fallback was never reachable on the platform that needed it.
+# `shasum -a 256` accepts --check/--status on both macOS and Linux (and still
+# exits non-zero on a checksum mismatch), so prefer it, keeping sha256sum for
+# minimal images that ship coreutils but no perl.
+if command -v shasum >/dev/null 2>&1; then
   printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check --status
+else
+  printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
 fi
 tar -xzf "$archive" -C "$workdir" gitleaks
 install -m 0755 "$workdir/gitleaks" "$destination/gitleaks"
