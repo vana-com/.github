@@ -153,6 +153,86 @@ if [[ -e "$test_root/external-tools/gitleaks/gitleaks" ]]; then
   exit 1
 fi
 
+# Git exports the repository environment into hook processes. A command that
+# must target the policy checkout has to ignore it: GIT_DIR is absolute in a
+# linked worktree, so a bare `git -C "$policy" ...` reads the PUSHING repo's
+# HEAD and origin instead, and GIT_CONFIG_PARAMETERS (exported by
+# `git -c foo=bar push`) lets the caller's environment answer the origin check.
+# Both are accepted inputs from an untrusted caller, so both are tested here.
+env_policy="$test_root/env-policy"
+git clone -q "$root" "$env_policy"
+git -C "$env_policy" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$env_policy" checkout -q "$policy_sha"
+"$env_policy/scripts/install-pre-push.sh" prepare --shared-dir "$env_policy" --ref "$policy_sha"
+
+# A decoy repository standing in for the one being pushed: a different HEAD and
+# a non-Vana origin, so leaking into it fails the SHA and origin checks.
+decoy="$test_root/env-decoy"
+git init -q -b main "$decoy"
+git -C "$decoy" config user.name test
+git -C "$decoy" config user.email test@example.invalid
+git -C "$decoy" remote add origin https://example.invalid/pushing-repo.git
+git -C "$decoy" commit --allow-empty -q -m decoy
+decoy_git_dir=$(git -C "$decoy" rev-parse --absolute-git-dir)
+
+# `prepare` only inspects the policy checkout, so it isolates the scrub from
+# the target-repository resolution that legitimately reads the environment.
+if ! GIT_DIR="$decoy_git_dir" \
+    "$env_policy/scripts/install-pre-push.sh" prepare --shared-dir "$env_policy" --ref "$policy_sha" >/dev/null 2>&1; then
+  printf 'expected prepare to resolve the policy checkout with GIT_DIR inherited\n' >&2
+  exit 1
+fi
+
+# The pre-push hook performs the same checks, so it must scrub the same way.
+worktree_repo="$test_root/worktree-repo"
+git init -q -b main "$worktree_repo"
+git -C "$worktree_repo" config user.name test
+git -C "$worktree_repo" config user.email test@example.invalid
+git -C "$worktree_repo" commit --allow-empty -q -m base
+"$root/scripts/install-pre-push.sh" --shared-dir "$env_policy" --repo "$worktree_repo" --ref "$policy_sha" >/dev/null
+git -C "$worktree_repo" worktree add -q "$test_root/worktree-linked" -b linked
+linked_git_dir=$(git -C "$test_root/worktree-linked" rev-parse --absolute-git-dir)
+worktree_head=$(git -C "$test_root/worktree-linked" rev-parse HEAD)
+if ! (cd "$test_root/worktree-linked" &&
+    GIT_DIR="$linked_git_dir" printf 'refs/heads/linked %s refs/heads/linked %040d\n' "$worktree_head" 0 |
+    GIT_DIR="$linked_git_dir" "$worktree_repo/.git/hooks/pre-push" origin example.invalid) >/dev/null 2>&1; then
+  printf 'expected pre-push hook to run from a linked worktree\n' >&2
+  exit 1
+fi
+
+# The origin check must read the checkout's real config, not the caller's
+# environment. Point the checkout at an attacker origin and claim otherwise.
+git -C "$env_policy" remote set-url origin https://github.com/attacker/evil.git
+if GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=remote.origin.url \
+    GIT_CONFIG_VALUE_0=https://github.com/vana-com/.github.git \
+    "$env_policy/scripts/install-pre-push.sh" prepare --shared-dir "$env_policy" --ref "$policy_sha" >/dev/null 2>&1; then
+  printf 'expected prepare to refuse an origin spoofed through the environment\n' >&2
+  exit 1
+fi
+if GIT_CONFIG_PARAMETERS="'remote.origin.url=https://github.com/vana-com/.github.git'" \
+    "$env_policy/scripts/install-pre-push.sh" prepare --shared-dir "$env_policy" --ref "$policy_sha" >/dev/null 2>&1; then
+  printf 'expected prepare to refuse an origin spoofed through GIT_CONFIG_PARAMETERS\n' >&2
+  exit 1
+fi
+git -C "$env_policy" remote set-url origin https://github.com/vana-com/.github.git
+
+# The download checksum gate must reject a corrupted archive on this platform,
+# whichever of shasum/sha256sum install-gitleaks.sh selects.
+checksum_digest=$(printf 'gitleaks' | { command -v shasum >/dev/null 2>&1 && shasum -a 256 || sha256sum; } | cut -d' ' -f1)
+checksum_file="$test_root/checksum-probe"
+printf 'gitleaks' >"$checksum_file"
+if ! printf '%s  %s\n' "$checksum_digest" "$checksum_file" |
+    { command -v shasum >/dev/null 2>&1 && shasum -a 256 --check --status || sha256sum --check --status; }; then
+  printf 'expected the checksum tool to accept a matching digest\n' >&2
+  exit 1
+fi
+if printf '%s  %s\n' "$(printf '0%.0s' {1..64})" "$checksum_file" |
+    { command -v shasum >/dev/null 2>&1 && shasum -a 256 --check --status || sha256sum --check --status; } 2>/dev/null; then
+  printf 'expected the checksum tool to reject a mismatched digest\n' >&2
+  exit 1
+fi
+
 key='4f3c8b1a9e6d2c7f0b5e1d8a6c3f9b2e''7d4a1c8f5b0e6d3a9c2f7b4e1d8a6c3f'
 scan() { "$scanner" --repo "$repo" --range "$1" --config "$config" --gitleaks "$gitleaks"; }
 expect_scan_status() {
