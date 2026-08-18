@@ -45,7 +45,39 @@ esac
   exit 2
 }
 
-git -C "$shared_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+# Git exports GIT_DIR (and friends) into hook processes. In a linked worktree
+# that value is an ABSOLUTE path, so a plain `git -C "$shared_dir" ...` still
+# resolves against the pushing repository and reports ITS HEAD, origin and
+# status instead of the pinned policy checkout's — the hook then refuses a
+# perfectly good checkout ("Vana scanner checkout is at <repo HEAD>"). In a
+# normal checkout GIT_DIR is the relative ".git", which happens to resolve
+# correctly under -C, which is why this only bites worktrees. Scrub the
+# inherited repository environment for commands that must target the checkout;
+# commands that scan the pushing repository keep it.
+# The scrub list comes from git itself (`--local-env-vars` covers GIT_DIR,
+# GIT_WORK_TREE, GIT_INDEX_FILE, the object-directory pair, and crucially
+# GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT, which `git -c foo=bar push` exports
+# into hooks and which would otherwise let the caller's environment satisfy the
+# origin check below instead of the checkout's real config). The GIT_CONFIG_*
+# file overrides are not in that list, so they are added explicitly, and a
+# hardcoded fallback covers a git too old to answer.
+_shared_git_scrub=()
+while IFS= read -r _v; do
+  [[ -n "$_v" ]] && _shared_git_scrub+=(-u "$_v")
+done < <(git rev-parse --local-env-vars 2>/dev/null || printf '%s\n' \
+  GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT)
+for _v in GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM; do
+  _shared_git_scrub+=(-u "$_v")
+done
+unset _v
+
+shared_git() {
+  env "${_shared_git_scrub[@]}" git "$@"
+}
+
+shared_git -C "$shared_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   printf 'Policy checkout is not a Git work tree: %s\n' "$shared_dir" >&2
   exit 2
 }
@@ -53,17 +85,17 @@ git -C "$shared_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
 [[ -x "$shared_dir/scripts/install-gitleaks.sh" ]] || { printf 'No installer at: %s/scripts/install-gitleaks.sh\n' "$shared_dir" >&2; exit 2; }
 [[ -x "$shared_dir/scripts/verify-gitleaks.sh" ]] || { printf 'No verifier at: %s/scripts/verify-gitleaks.sh\n' "$shared_dir" >&2; exit 2; }
 shared_dir=$(cd "$shared_dir" && pwd -P)
-actual_sha=$(git -C "$shared_dir" rev-parse HEAD)
+actual_sha=$(shared_git -C "$shared_dir" rev-parse HEAD)
 [[ "$actual_sha" == "$expected_sha" ]] || {
   printf 'Policy checkout is at %s, expected %s.\n' "$actual_sha" "$expected_sha" >&2
   exit 2
 }
-origin_url=$(git -C "$shared_dir" config --get remote.origin.url || true)
+origin_url=$(shared_git -C "$shared_dir" config --get remote.origin.url || true)
 case "$origin_url" in
   git@github.com:vana-com/.github|git@github.com:vana-com/.github.git|https://github.com/vana-com/.github|https://github.com/vana-com/.github.git) ;;
   *) printf 'Policy checkout origin is not vana-com/.github: %s\n' "${origin_url:-<unset>}" >&2; exit 2 ;;
 esac
-if [[ -n "$(git -C "$shared_dir" status --porcelain --untracked-files=all -- ':!/.tools')" ]]; then
+if [[ -n "$(shared_git -C "$shared_dir" status --porcelain --untracked-files=all -- ':!/.tools')" ]]; then
   printf 'Policy checkout has local changes: %s\n' "$shared_dir" >&2
   exit 2
 fi

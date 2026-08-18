@@ -14,23 +14,55 @@ if [[ -z "$expected_sha" || ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 
+# Git exports GIT_DIR (and friends) into hook processes. In a linked worktree
+# that value is an ABSOLUTE path, so a plain `git -C "$shared_dir" ...` still
+# resolves against the pushing repository and reports ITS HEAD, origin and
+# status instead of the pinned policy checkout's — the hook then refuses a
+# perfectly good checkout ("Vana scanner checkout is at <repo HEAD>"). In a
+# normal checkout GIT_DIR is the relative ".git", which happens to resolve
+# correctly under -C, which is why this only bites worktrees. Scrub the
+# inherited repository environment for commands that must target the checkout;
+# commands that scan the pushing repository keep it.
+# The scrub list comes from git itself (`--local-env-vars` covers GIT_DIR,
+# GIT_WORK_TREE, GIT_INDEX_FILE, the object-directory pair, and crucially
+# GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT, which `git -c foo=bar push` exports
+# into hooks and which would otherwise let the caller's environment satisfy the
+# origin check below instead of the checkout's real config). The GIT_CONFIG_*
+# file overrides are not in that list, so they are added explicitly, and a
+# hardcoded fallback covers a git too old to answer.
+_shared_git_scrub=()
+while IFS= read -r _v; do
+  [[ -n "$_v" ]] && _shared_git_scrub+=(-u "$_v")
+done < <(git rev-parse --local-env-vars 2>/dev/null || printf '%s\n' \
+  GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT)
+for _v in GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM; do
+  _shared_git_scrub+=(-u "$_v")
+done
+unset _v
+
+shared_git() {
+  env "${_shared_git_scrub[@]}" git "$@"
+}
+
 scanner="$shared_dir/scripts/scan-commit-range.sh"
 verifier="$shared_dir/scripts/verify-gitleaks.sh"
 [[ -x "$scanner" && -x "$verifier" ]] || {
   printf 'VANA_SECRET_SCAN_HOME is not a valid shared scanner checkout.\n' >&2
   exit 2
 }
-actual_sha=$(git -C "$shared_dir" rev-parse HEAD)
+actual_sha=$(shared_git -C "$shared_dir" rev-parse HEAD)
 if [[ "$actual_sha" != "$expected_sha" ]]; then
   printf 'Vana scanner checkout is at %s, expected %s.\n' "$actual_sha" "$expected_sha" >&2
   exit 2
 fi
-origin_url=$(git -C "$shared_dir" config --get remote.origin.url || true)
+origin_url=$(shared_git -C "$shared_dir" config --get remote.origin.url || true)
 case "$origin_url" in
   git@github.com:vana-com/.github|git@github.com:vana-com/.github.git|https://github.com/vana-com/.github|https://github.com/vana-com/.github.git) ;;
   *) printf 'Vana scanner checkout origin is not vana-com/.github: %s\n' "${origin_url:-<unset>}" >&2; exit 2 ;;
 esac
-git -C "$shared_dir" diff --quiet -- . && git -C "$shared_dir" diff --cached --quiet -- . || {
+shared_git -C "$shared_dir" diff --quiet -- . && shared_git -C "$shared_dir" diff --cached --quiet -- . || {
   printf 'Vana scanner checkout has local changes: %s\n' "$shared_dir" >&2
   exit 2
 }
