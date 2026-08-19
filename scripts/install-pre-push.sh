@@ -74,7 +74,18 @@ done
 unset _v
 
 shared_git() {
-  env "${_shared_git_scrub[@]}" git "$@"
+  # `-c` overrides neutralize execution-capable settings a poisoned checkout
+  # could plant in its own .git/config: core.fsmonitor runs a command during
+  # `git status`, and the *Proxy/*Command hooks run during fetch.
+  env "${_shared_git_scrub[@]}" git \
+    -c core.fsmonitor= \
+    -c core.hooksPath=/dev/null \
+    -c core.sshCommand= \
+    -c core.askPass= \
+    -c credential.helper= \
+    -c protocol.ext.allow=never \
+    -c uploadpack.packObjectsHook= \
+    "$@"
 }
 
 shared_git -C "$shared_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {

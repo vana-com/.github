@@ -256,6 +256,23 @@ if VANA_POLICY_SHA="$policy_sha" "$bootstrap" bogus-action >/dev/null 2>&1; then
 fi
 
 printf '[remote "origin"]\n\turl = https://github.com/vana-com/.github\n' >"$test_root/spoof.gitconfig"
+# A poisoned cache must not execute code through its own local config while it
+# is being authenticated: core.fsmonitor runs a command during `git status`.
+fsmonitor_home="$test_root/fsmonitor-home"
+mkdir -p "$fsmonitor_home/vana-secret-scan/policy"
+fsmonitor_cache="$fsmonitor_home/vana-secret-scan/policy/$policy_sha"
+git clone -q "$root" "$fsmonitor_cache"
+git -C "$fsmonitor_cache" remote set-url origin https://github.com/vana-com/.github.git
+git -C "$fsmonitor_cache" checkout -q "$policy_sha"
+printf '#!/bin/sh\ntouch %q\nexit 1\n' "$test_root/fsmonitor-fired" >"$test_root/evil-fsmonitor"
+chmod 0755 "$test_root/evil-fsmonitor"
+git -C "$fsmonitor_cache" config core.fsmonitor "$test_root/evil-fsmonitor"
+XDG_DATA_HOME="$fsmonitor_home" VANA_POLICY_SHA="$policy_sha" "$bootstrap" status >/dev/null 2>&1 || true
+if [[ -e "$test_root/fsmonitor-fired" ]]; then
+  printf 'expected bootstrap to neutralize core.fsmonitor on an unauthenticated cache\n' >&2
+  exit 1
+fi
+
 bootstrap_home="$test_root/bootstrap-home"
 mkdir -p "$bootstrap_home/vana-secret-scan/policy"
 bootstrap_cache="$bootstrap_home/vana-secret-scan/policy/$policy_sha"
