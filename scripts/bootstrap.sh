@@ -71,7 +71,19 @@ policy_git() {
   for v in GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM; do
     scrub+=(-u "$v")
   done
-  env "${scrub[@]}" git "$@"
+  # `-c` overrides neutralize execution-capable settings a poisoned cache could
+  # plant in its own .git/config: core.fsmonitor runs a command during `git
+  # status`, and the *Proxy/*Command hooks run during fetch. These must be off
+  # for every command that touches a cache we have not yet authenticated.
+  env "${scrub[@]}" git \
+    -c core.fsmonitor= \
+    -c core.hooksPath=/dev/null \
+    -c core.sshCommand= \
+    -c core.askPass= \
+    -c credential.helper= \
+    -c protocol.ext.allow=never \
+    -c uploadpack.packObjectsHook= \
+    "$@"
 }
 
 cleanup() {
