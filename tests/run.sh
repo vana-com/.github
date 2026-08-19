@@ -233,6 +233,41 @@ if printf '%s  %s\n' "$(printf '0%.0s' {1..64})" "$checksum_file" |
   exit 1
 fi
 
+# The central bootstrap is what consuming repositories exec after fetching this
+# checkout, so it must enforce the same policy-cache guarantees as the installer
+# it delegates to. A stub that passes a bad SHA, or a cache whose origin is
+# spoofed through the environment, must not reach install-pre-push.sh.
+bootstrap="$root/scripts/bootstrap.sh"
+[[ -x "$bootstrap" ]] || {
+  printf 'expected an executable scripts/bootstrap.sh\n' >&2
+  exit 1
+}
+if VANA_POLICY_SHA=not-a-sha "$bootstrap" status >/dev/null 2>&1; then
+  printf 'expected bootstrap to refuse a malformed policy SHA\n' >&2
+  exit 1
+fi
+if VANA_POLICY_SHA= "$bootstrap" status >/dev/null 2>&1; then
+  printf 'expected bootstrap to refuse an empty policy SHA\n' >&2
+  exit 1
+fi
+if VANA_POLICY_SHA="$policy_sha" "$bootstrap" bogus-action >/dev/null 2>&1; then
+  printf 'expected bootstrap to refuse an unknown action\n' >&2
+  exit 1
+fi
+
+printf '[remote "origin"]\n\turl = https://github.com/vana-com/.github\n' >"$test_root/spoof.gitconfig"
+bootstrap_home="$test_root/bootstrap-home"
+mkdir -p "$bootstrap_home/vana-secret-scan/policy"
+bootstrap_cache="$bootstrap_home/vana-secret-scan/policy/$policy_sha"
+git clone -q "$root" "$bootstrap_cache"
+git -C "$bootstrap_cache" remote set-url origin https://github.com/attacker/evil.git
+git -C "$bootstrap_cache" checkout -q "$policy_sha"
+if XDG_DATA_HOME="$bootstrap_home" GIT_CONFIG_GLOBAL="$test_root/spoof.gitconfig" \
+    VANA_POLICY_SHA="$policy_sha" "$bootstrap" status >/dev/null 2>&1; then
+  printf 'expected bootstrap to refuse a cache whose origin is spoofed via the environment\n' >&2
+  exit 1
+fi
+
 key='4f3c8b1a9e6d2c7f0b5e1d8a6c3f9b2e''7d4a1c8f5b0e6d3a9c2f7b4e1d8a6c3f'
 scan() { "$scanner" --repo "$repo" --range "$1" --config "$config" --gitleaks "$gitleaks"; }
 expect_scan_status() {
