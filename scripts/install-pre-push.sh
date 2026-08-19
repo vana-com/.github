@@ -80,8 +80,6 @@ shared_git() {
   env "${_shared_git_scrub[@]}" git \
     -c core.fsmonitor= \
     -c core.hooksPath=/dev/null \
-    -c core.sshCommand= \
-    -c core.askPass= \
     -c credential.helper= \
     -c protocol.ext.allow=never \
     -c uploadpack.packObjectsHook= \
