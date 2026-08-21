@@ -1,0 +1,12 @@
+name: Codex review
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    secrets: inherit
