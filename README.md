@@ -159,12 +159,18 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# Reusable-workflow permissions only flow downward: the caller must grant at
+# least what the called workflow's jobs request, or GitHub rejects the call
+# before anything runs (startup_failure). The review job needs contents:read;
+# the comment job needs issues:write/pull-requests:write to post the review.
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   review:
-    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@<commit-sha>
     secrets: inherit
 ```
 
@@ -176,15 +182,16 @@ workflow only reads a single well-known secret name (`OPENAI_API_KEY`), so
 there is no risk of over-sharing unrelated secrets into it. Repositories that
 prefer to be explicit can instead pass `secrets: { OPENAI_API_KEY: ...}`.
 
-This workflow is pinned to `@main` rather than a release SHA, unlike the
-EVM key-scan workflow above. That is a deliberate difference: the key-scan
-policy is a security control where an unreviewed change landing silently in
-every caller is the exact failure this repo exists to prevent, so it pins to
-an immutable, reviewed commit. This review workflow's blast radius is a worse
-or missing PR comment — annoying, not dangerous — so it optimizes for callers
-always getting the latest prompt fixes without a manual pin bump. If a future
-consumer needs reproducible-forever CI behavior, pin to a
-commit SHA instead of `@main` in that repo's caller workflow.
+This workflow is pinned to an immutable commit SHA, matching the EVM
+key-scan workflow above -- both are security-adjacent: `secrets: inherit`
+means an unreviewed push to this repo's `main` would otherwise reach every
+consuming repository's `OPENAI_API_KEY` with no gate in between. An earlier
+version of this doc argued `@main` was fine here because a bad prompt is
+"annoying, not dangerous" -- that reasoning missed that the actual risk isn't
+prompt quality, it's secret exposure, and two independent automated reviews
+flagged it before a human did. Bump the pin deliberately (a one-line change
+per consuming repo) when adopting a new commit here, the same as the
+key-scan workflow.
 
 ### Inputs
 
@@ -198,7 +205,7 @@ Override either from the caller when needed:
 ```yaml
 jobs:
   review:
-    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@<commit-sha>
     with:
       model: gpt-5.6-terra
       effort: medium
