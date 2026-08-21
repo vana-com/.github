@@ -137,6 +137,91 @@ repository. The liveness tests use mocked RPC
 responses for scalar validation, address derivation, active and inactive
 accounts, incomplete checks, redaction, and range materialization.
 
+## Codex PR review
+
+`.github/workflows/codex-review-reusable.yml` is a shared, `workflow_call`
+reusable workflow that runs an automated Codex review on every pull request
+and posts the result as a PR comment. Consuming repositories no longer
+maintain their own copy of this logic, so improvements (the fork-PR safety
+gate, prompt tuning, cost tracking) land once here instead of drifting across
+repos. Cost tracking and a couple of other proposed additions are being held
+for a follow-up PR pending review — see that PR's description for what's
+outstanding.
+
+### Adopt it in a repository
+
+Add this thin caller workflow at `.github/workflows/codex-review.yml` in the
+consuming repository:
+
+```yaml
+name: Codex review
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    secrets: inherit
+```
+
+`secrets: inherit` forwards the calling repository's `OPENAI_API_KEY` (an
+organization or repository secret) to the reusable workflow. This is the
+standard pattern for an org-wide reusable workflow consumed by many
+repositories: it avoids naming every secret at every call site, and this
+workflow only reads a single well-known secret name (`OPENAI_API_KEY`), so
+there is no risk of over-sharing unrelated secrets into it. Repositories that
+prefer to be explicit can instead pass `secrets: { OPENAI_API_KEY: ...}`.
+
+This workflow is pinned to `@main` rather than a release SHA, unlike the
+EVM key-scan workflow above. That is a deliberate difference: the key-scan
+policy is a security control where an unreviewed change landing silently in
+every caller is the exact failure this repo exists to prevent, so it pins to
+an immutable, reviewed commit. This review workflow's blast radius is a worse
+or missing PR comment — annoying, not dangerous — so it optimizes for callers
+always getting the latest prompt fixes without a manual pin bump. If a future
+consumer needs reproducible-forever CI behavior, pin to a
+commit SHA instead of `@main` in that repo's caller workflow.
+
+### Inputs
+
+| Input    | Default       | Purpose                                    |
+|----------|---------------|---------------------------------------------|
+| `model`  | `gpt-5.6-sol` | Codex model used for the review.           |
+| `effort` | `high`        | Reasoning effort passed to the model.      |
+
+Override either from the caller when needed:
+
+```yaml
+jobs:
+  review:
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    with:
+      model: gpt-5.6-terra
+      effort: medium
+    secrets: inherit
+```
+
+These were previously read from `vars.CODEX_REVIEW_MODEL` /
+`vars.CODEX_REVIEW_EFFORT` org variables in each repo's own copy of this
+workflow. A `workflow_call` reusable workflow's own `vars.*` references do
+resolve against the calling repository's configuration variables, but relying
+on that implicitly is a poor fit for a workflow meant to be called from many
+repositories: the effective model/effort for a given caller would depend on
+org- or repo-level variables that are invisible at the call site itself.
+Explicit `inputs` make the override visible in the caller's own workflow file
+and keep the contract self-documenting; repos that already set
+`CODEX_REVIEW_MODEL`/`CODEX_REVIEW_EFFORT` variables can pass them through
+explicitly with `with: { model: ${{ vars.CODEX_REVIEW_MODEL }}, ... }`.
+
+The reviewer never runs on pull requests from forks, because fork PRs do not
+receive repository secrets — this is enforced inside the reusable workflow
+itself (`if: github.event.pull_request.head.repo.full_name == github.repository`
+on the `review` job), not something each caller needs to re-implement.
+
 ## License
 
 The repository root is [MIT licensed](LICENSE). The isolated

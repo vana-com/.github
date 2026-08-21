@@ -1,0 +1,102 @@
+name: Codex review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: >-
+          Codex model to use for the review. Callers should override this only
+          deliberately; the default here is the org's current release choice.
+        type: string
+        default: gpt-5.6-sol
+      effort:
+        description: Reasoning effort passed to the Codex model.
+        type: string
+        default: high
+    secrets:
+      OPENAI_API_KEY:
+        description: >-
+          API key for the Codex review model. Pass via `secrets: inherit` from
+          the caller, or forward this specific secret explicitly.
+        required: true
+
+# A new push supersedes an in-flight review. The surviving run always reports
+# against the PR's current head rather than publishing stale feedback.
+#
+# The group key is namespaced by the calling repository, not just the PR
+# number: this workflow is shared across many repos, and github.repository
+# inside a called reusable workflow resolves to the CALLER's repo (the
+# concurrency group is evaluated in the caller's context), so this is only a
+# safeguard against a rare same-name-different-repo collision, not a strictly
+# required qualifier.
+concurrency:
+  group: codex-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    # Repository secrets are intentionally unavailable to fork PRs. Do not run
+    # an API-key-backed reviewer there; maintainers can review those normally.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      final_message: ${{ steps.codex.outputs.final-message }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select the full PR review range
+        id: range
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$PR_BASE_SHA" "$PR_HEAD_SHA"
+          echo "base=$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")" >> "$GITHUB_OUTPUT"
+          echo "head=$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "kind=full PR" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex review
+        id: codex
+        # Current v1 action commit. Keep the API-key-bearing action immutable;
+        # update this SHA deliberately when adopting a newer v1 release.
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          sandbox: read-only
+          prompt: |
+            Review ${{ steps.range.outputs.kind }} for pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Review range: ${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}.
+
+            Inspect only that range with git. Find concrete correctness, regression, security, and maintainability issues. Do not restate the diff. Do not propose speculative refactors. If there are no actionable findings, say exactly: "No actionable findings."
+
+  comment:
+    needs: review
+    if: always() && needs.review.outputs.final_message != ''
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Post this review as a new PR comment
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.review.outputs.final_message }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: process.env.CODEX_FINAL_MESSAGE,
+            });
