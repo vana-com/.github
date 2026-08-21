@@ -3,10 +3,17 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# Reusable-workflow permissions only flow downward: the caller must grant at
+# least what the called workflow's jobs request, or GitHub rejects the call
+# before anything runs (startup_failure, confirmed in context-gateway).
+# The reusable workflow's review job needs contents:read; its comment job
+# needs issues:write/pull-requests:write to post the review.
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   review:
-    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@main
+    uses: vana-com/.github/.github/workflows/codex-review-reusable.yml@b72616c0cc10b2d05a11e3ad66806909e48ffd24
     secrets: inherit
