@@ -1,6 +1,6 @@
 // Trusted automation only: caller code is never checked out or executed.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,6 +16,37 @@ export const APP_OWNERS = Object.freeze({
   'my-two-cents': ['vana-com/my-two-cents', 'prj_u5iiNxoAsSv2bSJN0K45tjr9DB01'],
 });
 const NEON_REQUIRED = new Set(['web', 'account', 'community']);
+
+// Retries only transient failures. Responses and thrown errors never expose bodies or URLs.
+export async function retryRequest(fetchFn, sleep, url, options, { attempts = 3, maxDelayMs = 5000, timeoutMs = 10000, allowMissing = false } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let response;
+    try {
+      response = await fetchFn(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+    } catch {
+      if (attempt === attempts - 1) throw new Error('API network or timeout failure');
+      await sleep(Math.min(500 * 2 ** attempt, maxDelayMs));
+      continue;
+    }
+    if (response.ok || (allowMissing && response.status === 404)) return response;
+    if ((response.status !== 429 && response.status < 500) || attempt === attempts - 1) {
+      throw new Error(`API request failed (${response.status})`);
+    }
+    const retryAfter = response.headers?.get('retry-after');
+    const seconds = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : NaN;
+    const date = retryAfter ? Date.parse(retryAfter) : NaN;
+    const delay = Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 500 * 2 ** attempt;
+    await sleep(Math.min(delay, maxDelayMs));
+  }
+}
+
+function failureReason(error) {
+  const match = /^API request failed \((\d{3})\)$/.exec(error?.message ?? '');
+  if (match) return `API request failed (${match[1]})`;
+  if (error?.message === 'API network or timeout failure') return error.message;
+  if (/^Preview alias (set|rm) failed$/.test(error?.message ?? '')) return error.message;
+  return 'Preview operation failed';
+}
 
 export function previewHost(app, pr, domain) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(app) || app.length > 40 ||
@@ -81,6 +112,11 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     const host = previewHost(app.app, pr, domain);
     if (aliases.some(a => a.alias === host)) await alias('rm', host, null, app);
   }
+  const failures = [], results = [];
+  const safely = async (app, fn) => {
+    try { await fn(); results.push({ app: app.app, state: 'cleanup-checked' }); }
+    catch (error) { failures.push({ app: app.app, reason: failureReason(error) }); }
+  };
   if (eventName === 'pull_request_target') {
     const pr = event.pull_request;
     if (pr?.head?.repo?.full_name !== repo) return { state: 'ignored' };
@@ -90,12 +126,12 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
       return { state: matrix.some(app => provisioningState(app) === 'required-unavailable') ? 'required-unavailable' : 'awaiting-deployment' };
     }
     if (event.action !== 'closed') return { state: 'ignored' };
-    for (const app of matrix) await remove(app, pr.number, await api('vercel', '/aliases', null, app));
-    return { state: 'cleanup-checked' };
+    for (const app of matrix) await safely(app, async () => remove(app, pr.number, await api('vercel', '/aliases', null, app)));
+    return { state: failures.length ? 'failed' : 'cleanup-checked', failures, results };
   }
   if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
     const pushNeeded = [];
-    for (const app of matrix) {
+    for (const app of matrix) await safely(app, async () => {
       const aliases = await api('vercel', '/aliases', null, app);
       const client = app.callback_paths.length ? await api('account', '', null, app) : {};
       const prs = new Set(aliases.map(a => ownedPr(a.alias, app.app, domain)).filter(Boolean));
@@ -128,10 +164,10 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
         await alias('set', host, replacement.id, app);
         if (!currentHead(await pull(pr), sha)) await alias('rm', host, null, app);
       }
-    }
-    return { state: pushNeeded.length ? 'push-needed' : 'cleanup-checked', pushNeeded };
+    });
+    return { state: failures.length ? 'failed' : pushNeeded.length ? 'push-needed' : 'cleanup-checked', failures, results, pushNeeded };
   }
-  if (eventName !== 'deployment_status' || event.deployment_status?.state !== 'success') return { state: 'ignored' };
+  if (eventName !== 'deployment_status' || !['success', 'failure', 'error'].includes(event.deployment_status?.state)) return { state: 'ignored' };
   let url;
   try { url = new URL(event.deployment_status.environment_url); } catch { return { state: 'ignored' }; }
   if (url.protocol !== 'https:' || url.username || url.password || url.port ||
@@ -139,23 +175,30 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   if (!/^[a-f0-9]{40}$/.test(event.deployment?.sha ?? '')) return { state: 'ignored' };
   const deployment = await api('vercel', `/deployments/${encodeURIComponent(url.hostname)}`);
   const app = matrix.find(item => item.project_id === deployment.projectId);
-  if (!app || !eligibleDeployment(deployment, app, event.deployment.sha)) return { state: 'ignored' };
+  if (!app || deployment.target === 'production' || deployment.customEnvironment ||
+      `${deployment.meta?.githubCommitOrg}/${deployment.meta?.githubCommitRepo}` !== repo ||
+      deployment.meta?.githubCommitSha !== event.deployment?.sha) return { state: 'ignored' };
+  if (event.deployment_status.state !== 'success') return { state: 'failed', failures: [{ app: app.app, reason: 'Deployment failed' }] };
+  if (deployment.readyState !== 'READY') return { state: 'ignored' };
+  try {
   const matches = await api('github', `/repos/${repo}/commits/${event.deployment.sha}/pulls`);
   const pr = matches.find(p => currentHead(p, event.deployment.sha));
   if (!pr || !currentHead(await pull(pr.number), event.deployment.sha)) return { state: 'ignored' };
   const state = provisioningState(app);
   if (state !== 'not-required') return { state, app: app.app };
   const host = previewHost(app.app, pr.number, domain);
+  // Register callbacks first so an Account failure cannot replace the last good alias.
+  for (const path of app.callback_paths) await api('account', '/redirect-uris', {
+    action: 'add', redirect_uri: `https://${host}${path}`,
+  }, app);
+  if (!currentHead(await pull(pr.number), event.deployment.sha)) return { state: 'stale', app: app.app };
   await alias('set', host, deployment.id, app);
   if (!currentHead(await pull(pr.number), event.deployment.sha)) {
     await alias('rm', host, null, app);
     return { state: 'stale' };
   }
-  // The Account endpoint replaces a redirect list; update paths sequentially.
-  for (const path of app.callback_paths) await api('account', '/redirect-uris', {
-    action: 'add', redirect_uri: `https://${host}${path}`,
-  }, app);
   return { state: 'published', app: app.app };
+  } catch (error) { return { state: 'failed', failures: [{ app: app.app, reason: failureReason(error) }] }; }
 }
 
 async function main() {
@@ -173,13 +216,12 @@ async function main() {
     if (account.protocol !== 'https:' || account.origin !== env.ACCOUNT_ORIGIN) throw new Error('Invalid ACCOUNT_ORIGIN');
   }
   async function request(base, path, token, body, allowMissing = false) {
-    const response = await fetch(base + path, {
+    const response = await retryRequest(fetch, ms => new Promise(resolve => setTimeout(resolve, ms)), base + path, {
       method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    });
+    }, { allowMissing });
     if (allowMissing && response.status === 404) return null;
-    if (!response.ok) throw new Error(`Preview auth API request failed (${response.status})`);
     return response.json();
   }
   const api = async (service, path, body, app) => {
@@ -219,7 +261,11 @@ async function main() {
   console.log(`Preview auth: ${result.state}${result.app ? ` (${result.app})` : ''}`);
   for (const host of result.pushNeeded ?? []) console.log(`Preview needs a new push: ${host}`);
   if (result.state === 'required-unavailable' || result.state === 'push-needed') process.exitCode = 1;
+  const lines = [...(result.results ?? []).map(r => `- ${r.app}: ${r.state}`), ...(result.failures ?? []).map(f => `- ${f.app}: failed — ${f.reason}`)];
+  if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `## Preview authentication\n${lines.length ? lines.join('\n') : `- ${result.app ?? 'All apps'}: ${result.state}`}\n`);
+  if (['required-unavailable', 'failed', 'push-needed'].includes(result.state)) process.exitCode = 1;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(() => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Preview authentication\n- Overall: failed — ${failureReason(error)}\n`);
   console.error('Preview auth failed; check trusted configuration and API access'); process.exitCode = 1;
 });

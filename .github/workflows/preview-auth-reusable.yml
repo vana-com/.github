@@ -31,7 +31,6 @@ jobs:
   sync:
     if: >-
       vars.PREVIEW_AUTH_ENABLED == 'true' &&
-      (github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success') &&
       (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 10

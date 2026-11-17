@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { previewAuth, validateMatrix } from './preview-auth.mjs';
+import { previewAuth, validateMatrix, retryRequest } from './preview-auth.mjs';
 
 const matrix = [
   { app: 'web', project_id: 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV', client_id_key: 'WEB_ID', callback_paths: ['/auth/callback'], needs_neon: true },
@@ -42,7 +42,7 @@ test('does not publish old builds and removes alias if head changes during assig
   let f = fixture({ pull: () => ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
   assert.equal((await f.run()).state, 'ignored');
   const staticApp = { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', callback_paths: [], needs_neon: false };
-  f = fixture({ deployment: { projectId: staticApp.project_id }, pull: n => n === 1 ? pr : ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
+  f = fixture({ deployment: { projectId: staticApp.project_id }, pull: n => n <= 2 ? pr : ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
   assert.equal((await f.run({ matrix: [staticApp] })).state, 'stale');
   assert.deepEqual(f.calls.filter(c => c[0] === 'alias').map(c => c[1]), ['set', 'rm']);
   assert.equal(f.calls.some(c => c[0] === 'account'), false);
@@ -131,4 +131,55 @@ test('sweep repairs missing targets only with a verified current-head deployment
   f = await run({ target: { readyState: 'READY' } }); assert.equal(f.calls.length, 0);
   f = await run({ pulls: () => ({ ...pr, base: { ref: 'main' } }) }); assert.deepEqual(f.calls.map(c => c[0]), ['rm']);
   f = await run({ pulls: () => ({ ...pr, state: 'closed' }) }); assert.deepEqual(f.calls.map(c => c[0]), ['rm']);
+});
+
+test('retries 429, clamps Retry-After and succeeds', async () => {
+  const delays = []; let calls = 0;
+  const response = await retryRequest(async () => ++calls === 1
+    ? { ok: false, status: 429, headers: new Headers({ 'Retry-After': '999' }) }
+    : { ok: true }, async ms => delays.push(ms), 'https://example.test', {});
+  assert.equal(response.ok, true); assert.equal(calls, 2); assert.deepEqual(delays, [5000]);
+});
+test('does not retry 401 and reports exhausted transient failures', async () => {
+  for (const [status, expected] of [[401, 1], [503, 3]]) {
+    let calls = 0;
+    await assert.rejects(retryRequest(async () => { calls++; return { ok: false, status, headers: new Headers() }; }, async () => {}, 'https://example.test', {}), new RegExp(`API request failed \\(${status}\\)`));
+    assert.equal(calls, expected);
+  }
+});
+test('cleanup isolates failed app and preserves its alias', async () => {
+  const f = fixture({ pull: () => ({ ...pr, state: 'closed' }), aliases: [{ alias: 'web-pr-12.vana.boo' }, { alias: 'account-pr-12.vana.boo' }] });
+  const api = async (service, path, body, app) => {
+    if (service === 'vercel' && app.app === 'web') throw new Error('secret response body');
+    if (service === 'vercel') return [{ alias: 'account-pr-12.vana.boo' }];
+    if (service === 'account') return {};
+    return { ...pr, state: 'closed' };
+  };
+  const alias = async (...args) => f.calls.push(['alias', ...args]);
+  const result = await f.run({ eventName: 'pull_request_target', event: { action: 'closed', pull_request: pr }, api, alias });
+  assert.equal(result.state, 'failed'); assert.deepEqual(result.failures, [{ app: 'web', reason: 'Preview operation failed' }]);
+  assert.deepEqual(f.calls.filter(c => c[0] === 'alias').map(c => c[2]), ['account-pr-12.vana.boo']);
+});
+test('failed deployment reports app without touching alias', async () => {
+  const f = fixture();
+  const result = await f.run({ event: { ...event, deployment_status: { ...event.deployment_status, state: 'failure' } } });
+  assert.deepEqual(result.failures, [{ app: 'web', reason: 'Deployment failed' }]);
+  assert.equal(f.calls.some(c => c[0] === 'alias'), false);
+});
+test('account failure leaves alias untouched and a later app publishes', async () => {
+  const apps = [
+    { app: 'mobile', project_id: 'prj_f3Hqy5lTO7KPRl9wVDNyhKEp5oGf', client_id_key: 'MOBILE_ID', callback_paths: ['/callback'], needs_neon: false },
+    { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', callback_paths: [], needs_neon: false },
+  ];
+  const failed = fixture({ deployment: { projectId: apps[0].project_id } });
+  const original = failed.run;
+  const api = async (service, path) => {
+    if (service === 'vercel') return { id: 'dpl_1', projectId: apps[0].project_id, readyState: 'READY', meta: { githubCommitOrg: 'vana-com', githubCommitRepo: 'unity-surfaces', githubCommitSha: sha } };
+    if (service === 'account') throw new Error('API request failed (503)');
+    return path.endsWith('/pulls') ? [pr] : pr;
+  };
+  assert.equal((await original({ matrix: apps, api })).state, 'failed');
+  assert.equal(failed.calls.some(c => c[0] === 'alias'), false);
+  const next = fixture({ deployment: { projectId: apps[1].project_id } });
+  assert.equal((await next.run({ matrix: apps })).state, 'published');
 });
