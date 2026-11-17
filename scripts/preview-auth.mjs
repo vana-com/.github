@@ -111,7 +111,62 @@ export function provisioningState(app) {
   return app.needs_neon === true && app.migrations_path ? 'required-unavailable' : 'not-required';
 }
 
+export async function resolveSignalPulls(repo, event, api) {
+  const run = event.workflow_run;
+  if (event.action !== 'completed' || event.repository?.full_name !== repo ||
+      run?.name !== 'Preview deployment signal' || run.path !== '.github/workflows/preview-deployment-signal.yml' ||
+      run.status !== 'completed' || run.conclusion !== 'success' || !['pull_request', 'deployment_status'].includes(run.event) ||
+      run.repository?.full_name !== repo || run.head_repository?.full_name !== repo || !SHA.test(run.head_sha ?? '')) return [];
+
+  const numbers = new Set();
+  const addPulls = pulls => {
+    if (!Array.isArray(pulls)) throw new PreviewError('GitHub returned an invalid pull request list');
+    for (const pr of pulls) if (Number.isSafeInteger(pr?.number) && pr.number > 0) numbers.add(pr.number);
+  };
+  addPulls(await api('github', `/repos/${repo}/commits/${run.head_sha}/pulls?per_page=100`) ?? []);
+  addPulls(run.pull_requests ?? []);
+  const branch = run.event === 'pull_request' && run.head_branch;
+  if (typeof branch === 'string' && branch.length > 0 && branch.length <= 255) {
+    // Commit associations omit closed PRs that were never merged.
+    const head = encodeURIComponent(`${repo.split('/')[0]}:${branch}`);
+    for (let page = 1; ; page++) {
+      const pulls = await api('github', `/repos/${repo}/pulls?state=all&head=${head}&per_page=100&page=${page}`);
+      addPulls(pulls);
+      if (pulls.length < 100) break;
+    }
+  }
+
+  const verified = [];
+  for (const number of numbers) {
+    const pr = await api('github', `/repos/${repo}/pulls/${number}`);
+    if (pr?.number !== number || pr.head?.repo?.full_name !== repo || !SHA.test(pr.head?.sha ?? '') ||
+        !['open', 'closed'].includes(pr.state)) continue;
+    const matchingHead = pr.head.sha === run.head_sha && (!branch || pr.head.ref === branch);
+    const matchingMerge = run.event === 'pull_request' && pr.merge_commit_sha === run.head_sha;
+    if (matchingHead || matchingMerge) verified.push(pr);
+  }
+  return verified;
+}
+
 export async function previewAuth({ eventName, event, repo, matrix, domain, targetBranch, decommission = false, api, alias }) {
+  if (eventName === 'workflow_run' && !decommission) {
+    const prs = await resolveSignalPulls(repo, event, api);
+    const outcomes = [];
+    for (const pr of prs) {
+      const action = pr.state === 'open' && pr.base?.ref === targetBranch ? 'reopened' : 'closed';
+      outcomes.push(await previewAuth({
+        eventName: 'pull_request_target', event: { action, pull_request: pr }, repo, matrix, domain, targetBranch, api, alias,
+      }));
+    }
+    const failures = outcomes.flatMap(result => result.failures ?? []);
+    const results = outcomes.flatMap(result => result.results ?? []);
+    const outcomesByPriority = ['failed', 'required-unavailable', 'published', 'awaiting-deployment', 'cleanup-checked'];
+    return {
+      state: outcomesByPriority.find(state => outcomes.some(result => result.state === state)) ?? 'ignored',
+      ...(failures.length ? { failures } : {}),
+      ...(results.length ? { results } : {}),
+    };
+  }
   const cleanupEvent = eventName === 'pull_request_target' && ['closed', 'edited'].includes(event.action);
   const sweep = ['schedule', 'workflow_dispatch'].includes(eventName);
   if (eventName === 'pull_request_target' && event.pull_request?.head?.repo?.full_name !== repo) return { state: 'ignored' };
@@ -239,6 +294,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     if (latest?.uid !== existing?.uid || latest?.deploymentId !== existing?.deploymentId) {
       throw new PreviewError('Alias changed during publication');
     }
+    if (latest?.deploymentId === deployment.id) return 'published';
     await alias('set', host, deployment);
     if (await recoveryPr(pr, deployment)) {
       await attempt(app.app, `remove stale PR #${pr} alias`, () =>
@@ -486,7 +542,10 @@ export function createApi(env, {
     return items;
   }
   const api = async (service, path, body, app) => {
-    if (service === 'github') return request(service, path);
+    if (service === 'github') {
+      const signalCommitLookup = /\/commits\/[a-f0-9]{40}\/pulls\?per_page=100$/.test(path);
+      return request(service, path, { allowMissing: signalCommitLookup });
+    }
     if (service === 'account') {
       if (path === '/clients') return allowlist().map(clientId => ({ clientId }));
       const endpoint = clientPath(app);
@@ -564,9 +623,20 @@ async function main() {
   };
   const event = parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
   if (!event) throw new PreviewError('Invalid GitHub event');
+  const adapters = createApi(env);
+  if (process.argv[2] === '--admit-signal') {
+    if (!env.GITHUB_OUTPUT) throw new PreviewError('Missing GitHub output path');
+    const eligible = env.GITHUB_EVENT_NAME === 'workflow_run' &&
+      (await resolveSignalPulls(env.GITHUB_REPOSITORY, event, adapters.api)).length > 0;
+    appendFileSync(env.GITHUB_OUTPUT, `eligible=${eligible}\n`);
+    if (env.GITHUB_STEP_SUMMARY && !eligible) {
+      appendFileSync(env.GITHUB_STEP_SUMMARY, 'Authenticated preview skipped. The signal does not identify a current same-repository PR.\n');
+    }
+    return;
+  }
   const result = await previewAuth({
     eventName: env.GITHUB_EVENT_NAME, event, repo: env.GITHUB_REPOSITORY, matrix: parse(env.APP_MATRIX),
-    domain: env.PREVIEW_DOMAIN, targetBranch: env.TARGET_BRANCH, decommission: env.PREVIEW_AUTH_DECOMMISSION === 'true', ...createApi(env),
+    domain: env.PREVIEW_DOMAIN, targetBranch: env.TARGET_BRANCH, decommission: env.PREVIEW_AUTH_DECOMMISSION === 'true', ...adapters,
   });
   console.log(`Preview auth: ${result.state}${result.app ? ` (${result.app})` : ''}`);
   for (const host of result.pushNeeded ?? []) console.log(`Preview needs a new push: ${host}`);

@@ -27,18 +27,44 @@ permissions:
   contents: read
   pull-requests: read
   deployments: read
+env:
+  TRUSTED_PREVIEW_AUTH_REF: 43a77b0040425749ead609f823e7daf9d529a50f
 jobs:
-  fork:
-    if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
-    permissions: {}
-    runs-on: ubuntu-24.04
-    steps:
-      - run: echo "Authenticated preview skipped for this fork PR. The credentialed job was skipped." >> "$GITHUB_STEP_SUMMARY"
-  sync:
+  admission:
     if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_run' &&
+      vars.PREVIEW_AUTH_ENABLED == 'true' &&
+      vars.PREVIEW_AUTH_DECOMMISSION != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.signal.outputs.eligible }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vana-com/.github
+          ref: ${{ env.TRUSTED_PREVIEW_AUTH_REF }}
+          path: trusted-preview-auth
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - id: signal
+        run: node trusted-preview-auth/scripts/preview-auth.mjs --admit-signal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+  sync:
+    needs: admission
+    if: >-
+      !cancelled() &&
+      github.ref == 'refs/heads/main' &&
       vars.PREVIEW_AUTH_ENABLED == 'true' &&
       (vars.PREVIEW_AUTH_DECOMMISSION != 'true' || github.event_name == 'workflow_dispatch') &&
-      (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.admission.outputs.eligible == 'true')
     concurrency:
       group: preview-auth-${{ github.repository }}
       queue: max
@@ -49,7 +75,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: vana-com/.github
-          ref: 43a77b0040425749ead609f823e7daf9d529a50f
+          ref: ${{ env.TRUSTED_PREVIEW_AUTH_REF }}
           path: trusted-preview-auth
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

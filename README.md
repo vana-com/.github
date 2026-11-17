@@ -244,8 +244,11 @@ the workflow. The workflow assigns an exact alias and enrolls exact OAuth
 callback URLs for each eligible deployment. Mobile previews run in the browser.
 
 The reusable workflow checks out its own automation at an immutable commit.
-The thin caller and app matrix run from the repository's default branch
-(`main`). Keep both pins reviewed. Fork PRs get a credential-free skip check.
+The credentialed caller and app matrix run from the repository's default branch
+(`main`). Pull request and deployment events start a separate signal workflow
+with no secrets, repository checkout or artifacts. A read-only admission job
+uses GitHub to confirm that the signal identifies a same-repository PR before
+the credentialed job can start.
 Each repository has one queue with up to 100 waiting jobs, so callback writes
 from different apps in that repository are serialized. Use distinct Account
 clients for each repository. [GitHub Actions concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)
@@ -255,18 +258,38 @@ clients for each repository. [GitHub Actions concurrency](https://docs.github.co
 1. Deploy the [Account narrow callback API](#account-configuration) to
    `account-dev`. Verify the dev database, peer app URLs, and Vercel DNS for the
    preview domain.
-2. Create the `preview-auth` GitHub environment. Add the repository's read-only
-   Doppler service token as `DOPPLER_PREVIEW_TOKEN`.
-3. Merge a thin caller like the one below to `main`. Pin it to a reviewed
-   organization workflow commit. Set the repository variable
+2. Create the `preview-auth` GitHub environment and allow deployments from
+   `main` only. Add the repository's read-only Doppler service token to that
+   environment as `DOPPLER_PREVIEW_TOKEN`.
+3. Merge the signal and credentialed caller to `main`. Pin the caller to a
+   reviewed organization workflow commit. Set the repository variable
    `PREVIEW_AUTH_ENABLED` to `true` when configuration is ready.
+
+Save the signal as `.github/workflows/preview-deployment-signal.yml`.
+
+```yaml
+name: Preview deployment signal
+on:
+  deployment_status:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, closed]
+permissions: {}
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Signal only. Fork PRs are ineligible for authenticated previews."
+```
+
+The credentialed caller responds to completed signals, or runs from `main` on
+the daily schedule or manual dispatch.
 
 ```yaml
 name: Preview auth
 on:
-  deployment_status:
-  pull_request_target:
-    types: [opened, reopened, synchronize, edited, closed]
+  workflow_run:
+    workflows: ['Preview deployment signal']
+    types: [completed]
   schedule:
     - cron: '23 5 * * *'
   workflow_dispatch:
@@ -281,6 +304,7 @@ permissions:
   deployments: read
 jobs:
   preview:
+    if: github.ref == 'refs/heads/main'
     uses: vana-com/.github/.github/workflows/preview-auth-reusable.yml@<reviewed-40-character-sha>
     with:
       target_branch: dev
@@ -291,6 +315,10 @@ jobs:
         [{"app":"web","project_id":"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV","client_id_key":"WEB_CLIENT_ID","callback_paths":["/oauth/callback"]}]
     secrets: inherit
 ```
+
+The caller trusts the workflow-run metadata GitHub sends. It looks up the PR
+and its current head through the GitHub API before reading Vercel deployments
+or changing preview state. [GitHub workflow run events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
 
 Each matrix entry names an app, its Vercel project and its exact callback paths.
 The org-owned manifest binds app names to repository and project IDs. Set

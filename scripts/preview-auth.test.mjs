@@ -20,6 +20,19 @@ const deploymentEvent = {
   deployment: { sha },
 };
 const pullEvent = (action, pull_request = basePr) => ({ eventName: 'pull_request_target', event: { action, pull_request } });
+const signal = (details = {}) => ({
+  eventName: 'workflow_run',
+  event: {
+    action: 'completed',
+    repository: { full_name: repo },
+    workflow_run: {
+      name: 'Preview deployment signal', path: '.github/workflows/preview-deployment-signal.yml',
+      event: 'pull_request', status: 'completed', conclusion: 'success',
+      repository: { full_name: repo }, head_repository: { full_name: repo }, head_sha: sha, head_branch: 'topic',
+      ...details,
+    },
+  },
+});
 const sweep = { eventName: 'schedule', event: {} };
 const dispatch = { eventName: 'workflow_dispatch', event: {}, decommission: true };
 const host = name => `${name}-pr-12.${domain}`;
@@ -172,6 +185,73 @@ test('fork PRs make no credentialed requests', async () => {
   const fork = { ...basePr, head: { ...basePr.head, repo: { full_name: 'someone/unity-surfaces' } } };
   assert.equal((await f.run(pullEvent('opened', fork))).state, 'ignored');
   assert.deepEqual(f.calls, []);
+});
+
+test('workflow_run publishes only after matching the signal to a fresh same-repository PR', async () => {
+  const f = fixture({ apps: [web] });
+  const result = await f.run(signal({ event: 'deployment_status', head_branch: null }));
+  assert.equal(result.state, 'published');
+  assert.equal(f.calls[0].origin, 'https://api.github.com');
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, 'dpl_web');
+  const writes = f.writes().length;
+  assert.equal((await f.run(signal())).state, 'published');
+  assert.equal(f.writes().length, writes);
+});
+
+test('workflow_run skips fork, foreign workflow and malformed signal metadata before any service request', async () => {
+  for (const details of [
+    { head_repository: { full_name: 'fork/unity-surfaces' } },
+    { repository: { full_name: 'repo/other' } },
+    { path: '.github/workflows/different.yml' },
+    { head_sha: '../evil' },
+  ]) {
+    const f = fixture();
+    assert.equal((await f.run(signal(details))).state, 'ignored');
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test('workflow_run resolves the current PR and rejects a fork even if the run reports the base repository', async () => {
+  const fork = { ...basePr, head: { ...basePr.head, repo: { full_name: 'someone/unity-surfaces' } } };
+  const f = fixture({ pr: fork });
+  assert.equal((await f.run(signal())).state, 'ignored');
+  assert.ok(f.calls.length > 0);
+  assert.ok(f.calls.every(c => c.origin === 'https://api.github.com'));
+});
+
+test('workflow_run branch lookup finds closed unmerged and retargeted PRs outside commit associations', async () => {
+  for (const pr of [closedPr, { ...basePr, base: { ref: 'main' } }]) {
+    const f = fixture({
+      apps: [web], pr, aliases: [mapping(web)], clientUris: { 'web-dev': [webUri] },
+      intercept: ({ url }) => {
+        if (url.pathname.includes('/commits/')) return json([]);
+        if (url.searchParams.get('state') === 'all') {
+          assert.equal(url.searchParams.get('head'), 'vana-com:topic');
+          return json([pr]);
+        }
+      },
+    });
+    assert.equal((await f.run(signal())).state, 'cleanup-checked');
+    assert.equal(f.state.aliases.size, 0);
+    assert.deepEqual(f.state.clientUris.get('web-dev'), []);
+  }
+});
+
+test('workflow_run stale head signal cannot publish or mutate credentials for the new head', async () => {
+  const f = fixture({ pr: { ...basePr, head: { ...basePr.head, sha: nextSha } } });
+  assert.equal((await f.run(signal())).state, 'ignored');
+  assert.ok(f.calls.length > 0);
+  assert.ok(f.calls.every(c => c.origin === 'https://api.github.com'));
+});
+
+test('workflow_run verifies a closed PR signaled with its GitHub merge SHA', async () => {
+  const f = fixture({
+    apps: [web], pr: { ...closedPr, merge_commit_sha: nextSha }, aliases: [mapping(web)],
+    intercept: ({ url }) => url.pathname.includes('/commits/') || url.searchParams.get('state') === 'all' ? json([]) : undefined,
+  });
+  const result = await f.run(signal({ head_sha: nextSha, head_branch: 'dev', pull_requests: [{ number: basePr.number }] }));
+  assert.equal(result.state, 'cleanup-checked');
+  assert.equal(f.state.aliases.size, 0);
 });
 
 test('static app can publish without any Account configuration', async () => {
