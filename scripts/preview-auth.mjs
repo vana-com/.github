@@ -18,6 +18,7 @@ const CLIENT_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const CALLBACK_PATH = /^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/;
 const SHA = /^[a-f0-9]{40}$/;
 const PR_NUMBER = /^[1-9][0-9]*$/;
+const PR_CONTEXT_APPS = new Set(['web', 'community', 'my-two-cents']);
 
 class PreviewError extends Error {}
 
@@ -155,12 +156,23 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   };
   const eligiblePr = pr => pr?.state === 'open' && pr.head?.repo?.full_name === repo && pr.base?.ref === targetBranch;
   const currentHead = (pr, sha) => eligiblePr(pr) && pr.head?.sha === sha;
-  const ownedDeployment = (deployment, app) => deployment?.projectId === app.project_id &&
-    deployment.target !== 'production' && !deployment.customEnvironment &&
+  const isProjectPreview = (deployment, app) => deployment?.projectId === app.project_id &&
+    (deployment.target == null || deployment.target === 'preview') && !deployment.customEnvironment;
+  const ownedDeployment = (deployment, app) => isProjectPreview(deployment, app) &&
     `${deployment.meta?.githubCommitOrg}/${deployment.meta?.githubCommitRepo}` === repo &&
     SHA.test(deployment.meta?.githubCommitSha ?? '');
   const eligibleDeployment = (deployment, app, sha) => ownedDeployment(deployment, app) &&
     deployment.readyState === 'READY' && deployment.meta.githubCommitSha === sha;
+  const beforePr = (deployment, pr) => {
+    const opened = Date.parse(pr.created_at);
+    return Number.isFinite(opened) && Number.isSafeInteger(deployment.createdAt) && deployment.createdAt > 0
+      ? deployment.createdAt < opened : null;
+  };
+  const hasPrContext = (deployment, pr) => beforePr(deployment, pr) === false &&
+    String(deployment.meta?.githubPrId) === String(pr.number) && deployment.meta?.githubCommitRef === pr.head.ref;
+  const sameGitHead = (deployment, pr) => deployment.gitSource?.type === 'github' &&
+    deployment.gitSource.sha === pr.head.sha && deployment.gitSource.ref === pr.head.ref &&
+    Number.isSafeInteger(pr.head.repo?.id) && String(deployment.gitSource.repoId) === String(pr.head.repo.id);
 
   const readTarget = id => api('vercel', `/deployments/${encodeURIComponent(id)}`);
   const readAlias = host => api('vercel', `/aliases/${encodeURIComponent(host)}`);
@@ -197,7 +209,9 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
 
   async function publish(app, pr, deployment, { expiredAlias, onlyMissingAlias = false } = {}) {
     const sha = deployment.meta.githubCommitSha;
-    if (!currentHead(await pull(pr), sha)) return 'stale';
+    const current = await pull(pr);
+    if (!currentHead(current, sha)) return 'stale';
+    if (PR_CONTEXT_APPS.has(app.app) && !hasPrContext(deployment, current)) return 'awaiting-deployment';
     const state = provisioningState(app);
     if (state !== 'not-required') return state;
     const host = previewHost(app.app, pr, domain);
@@ -235,14 +249,43 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     return 'published';
   }
 
-  async function findDeployment(app, sha) {
-    const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}&state=READY`, null, app);
-    for (const { uid } of candidates) {
-      if (!uid) continue;
-      const deployment = await readTarget(uid);
-      if (eligibleDeployment(deployment, app, sha)) return deployment;
+  async function reconcileBuild(app, pr, { reported, ...publishOptions } = {}) {
+    if (provisioningState(app) === 'required-unavailable') return 'required-unavailable';
+    const sha = pr.head.sha;
+    const needsPrContext = PR_CONTEXT_APPS.has(app.app);
+    const publishable = deployment => eligibleDeployment(deployment, app, sha) &&
+      (!needsPrContext || hasPrContext(deployment, pr));
+    if (reported && publishable(reported)) return publish(app, pr.number, reported, publishOptions);
+    const readyFilter = needsPrContext ? '' : '&state=READY';
+    const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}${readyFilter}`, null, app);
+    const ids = new Set([reported?.id, ...candidates.map(item => item.uid)]);
+    let source, newerBuild = false;
+    for (const id of ids) {
+      if (!id) continue;
+      const deployment = id === reported?.id ? reported : await readTarget(id);
+      if (publishable(deployment)) return publish(app, pr.number, deployment, publishOptions);
+      if (!needsPrContext || !isProjectPreview(deployment, app) || !sameGitHead(deployment, pr)) continue;
+      const prePr = beforePr(deployment, pr);
+      if (prePr === false) newerBuild = true;
+      // PR metadata can appear on an old deployment without changing its environment.
+      if (prePr && !source && ownedDeployment(deployment, app) && deployment.source === 'git' &&
+          !deployment.prebuilt && ['READY', 'ERROR'].includes(deployment.readyState) &&
+          /^dpl_[A-Za-z0-9]+$/.test(deployment.id ?? '') && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(deployment.name ?? '')) {
+        source = deployment;
+      }
     }
-    return null;
+    if (newerBuild) return 'awaiting-deployment';
+    if (!source) return null;
+    if (publishOptions.onlyMissingAlias && await readAlias(previewHost(app.app, pr.number, domain))) return 'alias-exists';
+    const current = await pull(pr.number);
+    if (!currentHead(current, sha) || !sameGitHead(source, current) || beforePr(source, current) !== true) return 'stale';
+    const refreshed = await api('vercel', '/redeploy', {
+      deploymentId: source.id, name: source.name, project: app.project_id, meta: { action: 'redeploy' },
+    });
+    if (!/^dpl_[A-Za-z0-9]+$/.test(refreshed?.id ?? '') || refreshed.id === source.id) {
+      throw new PreviewError('Vercel preview redeploy unconfirmed');
+    }
+    return 'redeploy-requested';
   }
 
   if (eventName === 'pull_request_target' && !cleanupEvent) {
@@ -254,8 +297,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
       const state = await attempt(app.app, 'find current preview deployment', async () => {
         if (provisioningState(app) === 'required-unavailable') return 'required-unavailable';
         if (event.action === 'synchronize') return 'awaiting-deployment';
-        const deployment = await findDeployment(app, current.head.sha);
-        return deployment ? publish(app, pr.number, deployment) : 'awaiting-deployment';
+        return await reconcileBuild(app, current) ?? 'awaiting-deployment';
       });
       if (state) results.push({ app: app.app, state });
     }
@@ -304,16 +346,16 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
         if (!existing) return;
         if (!existing.deploymentId) { pushNeeded.add(host); return; }
         const target = await readTarget(existing.deploymentId);
-        if (target?.readyState === 'READY') return;
-        if (target) { pushNeeded.add(host); return; }
+        if (target && target.readyState !== 'READY') { pushNeeded.add(host); return; }
+        if (target && !PR_CONTEXT_APPS.has(app.app)) return;
         const current = await pull(pr);
         if (!eligiblePr(current)) return;
-        const replacement = await findDeployment(app, current.head.sha);
-        if (!replacement || provisioningState(app) !== 'not-required') { pushNeeded.add(host); return; }
+        if (target && (!ownedDeployment(target, app) || beforePr(target, current) !== true)) return;
         const latest = await readAlias(host);
         if (latest?.uid !== existing.uid || latest?.deploymentId !== existing.deploymentId) return;
-        const state = await publish(app, pr, replacement, { expiredAlias: existing });
-        results.push({ app: app.app, state });
+        const state = await reconcileBuild(app, current, { expiredAlias: existing });
+        if (!state || state === 'required-unavailable') pushNeeded.add(host);
+        else results.push({ app: app.app, state });
       });
     }
 
@@ -336,13 +378,9 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
             const host = previewHost(app.app, pr.number, domain);
             if (aliases.has(host)) continue;
             await attempt(app.app, `recover PR #${pr.number} preview`, async () => {
-              const deployment = await findDeployment(app, pr.head.sha);
-              if (!deployment) return;
-              const state = await publish(app, pr.number, deployment, { onlyMissingAlias: true });
-              if (state === 'published') {
-                aliases.add(host);
-                results.push({ app: app.app, state });
-              }
+              const state = await reconcileBuild(app, pr, { onlyMissingAlias: true });
+              if (state === 'published') aliases.add(host);
+              if (state === 'published' || state === 'redeploy-requested') results.push({ app: app.app, state });
             });
           }
         }
@@ -361,16 +399,22 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   const deployment = await attempt('Vercel', 'read deployment', () => readTarget(url.hostname));
   const app = [...byApp.values()].find(item => item.project_id === deployment?.projectId);
   if (!app || !ownedDeployment(deployment, app) || deployment.meta.githubCommitSha !== event.deployment.sha) return finish('ignored');
-  if (event.deployment_status.state !== 'success') {
+  const success = event.deployment_status.state === 'success';
+  if (!success && !PR_CONTEXT_APPS.has(app.app)) {
     fail(app.app, 'build preview', new PreviewError('Deployment failed'));
     return finish('failed');
   }
-  if (deployment.readyState !== 'READY') return finish('ignored');
+  if (success && deployment.readyState !== 'READY') return finish('ignored');
   const sha = event.deployment.sha;
   const state = await attempt(app.app, 'publish preview', async () => {
     const matches = await api('github', `/repos/${repo}/commits/${sha}/pulls`);
     const pr = matches.find(candidate => currentHead(candidate, sha));
-    return pr ? publish(app, pr.number, deployment) : 'ignored';
+    if (!pr) return 'ignored';
+    if (!success && beforePr(deployment, pr) !== true) {
+      fail(app.app, 'build preview', new PreviewError('Deployment failed'));
+      return 'failed';
+    }
+    return await reconcileBuild(app, pr, { reported: deployment }) ?? 'awaiting-deployment';
   });
   return { ...finish(state), app: app.app };
 }
@@ -383,14 +427,14 @@ export function createApi(env, {
     vercel: ['Vercel', 'https://api.vercel.com', 'VERCEL_TOKEN'],
     account: ['Account', ACCOUNT_ORIGIN, 'ACCOUNT_ADMIN_TOKEN'],
   };
-  async function request(service, path, { method = 'GET', body, allowMissing = false, preflight, decode = true } = {}) {
+  async function request(service, path, { method = 'GET', body, allowMissing = false, preflight, decode = true, attempts } = {}) {
     const [name, origin, tokenKey] = services[service];
     if (!env[tokenKey]) throw new PreviewError(`Missing ${name} credentials`);
     const response = await retryRequest(fetchFn, sleep, origin + path, {
       method, redirect: 'error',
       headers: { Authorization: `Bearer ${env[tokenKey]}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    }, { allowMissing, service: name, preflight });
+    }, { allowMissing, service: name, preflight, attempts });
     if (!response || (allowMissing && response.status === 404) || !decode) return null;
     let data;
     try { data = await response.json(); } catch {}
@@ -475,6 +519,10 @@ export function createApi(env, {
     }
     if (path.startsWith('/deployments?sha=')) {
       return pages(`/v7/deployments?${team()}&projectId=${encodeURIComponent(app.project_id)}&limit=100&${path.split('?')[1]}`, 'deployments');
+    }
+    if (path === '/redeploy') {
+      // If the response is lost, discovery on the next run checks for the new build before another POST.
+      return request(service, `/v13/deployments?${team()}&forceNew=1`, { method: 'POST', body, attempts: 1 });
     }
     return request(service, `/v13${path}?${team()}`, { allowMissing: true });
   };

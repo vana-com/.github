@@ -8,7 +8,12 @@ const account = app('account', 'ACCOUNT_CLIENT_ID', ['/auth/oidc/callback']);
 const open = app('open');
 const repo = 'vana-com/unity-surfaces', domain = 'vana.boo';
 const sha = 'a'.repeat(40), nextSha = 'b'.repeat(40);
-const basePr = { number: 12, state: 'open', base: { ref: 'dev' }, head: { sha, ref: 'topic', repo: { full_name: repo } } };
+const prOpenedAt = '2026-11-17T22:18:23Z';
+const prOpenedMs = Date.parse(prOpenedAt);
+const basePr = {
+  number: 12, state: 'open', created_at: prOpenedAt, base: { ref: 'dev' },
+  head: { sha, ref: 'topic', repo: { full_name: repo, id: 1226317611 } },
+};
 const closedPr = { ...basePr, state: 'closed' };
 const deploymentEvent = {
   deployment_status: { state: 'success', environment_url: 'https://deploy.vercel.app' },
@@ -22,8 +27,10 @@ const webUri = `https://${host('web')}/oauth/callback`;
 const unknownPath = `https://${host('web')}/unrelated`;
 const foreignUri = 'https://my-two-cents-pr-4.vana.boo/api/member/auth/callback';
 const deployment = (app, details) => ({
-  id: `dpl_${app.app}`, projectId: app.project_id, readyState: 'READY', target: null,
-  meta: { githubCommitOrg: 'vana-com', githubCommitRepo: 'unity-surfaces', githubCommitSha: sha, githubCommitRef: 'topic' },
+  id: `dpl_${app.app}`, name: `vana-${app.app}`, projectId: app.project_id, readyState: 'READY', target: null,
+  createdAt: prOpenedMs + 1000, source: 'git',
+  gitSource: { type: 'github', sha, ref: 'topic', repoId: basePr.head.repo.id, prId: null },
+  meta: { githubCommitOrg: 'vana-com', githubCommitRepo: 'unity-surfaces', githubCommitSha: sha, githubCommitRef: 'topic', githubPrId: '12' },
   ...details,
 });
 const mapping = (app, deploymentId = `dpl_${app.app}`) => ({ uid: `alias_${app.app}`, alias: host(app.app), deploymentId, projectId: app.project_id });
@@ -96,9 +103,18 @@ function fixture({
     }
     if (url.pathname === '/v7/deployments') {
       return json({ deployments: [...state.deployments.values()]
-        .filter(d => d.projectId === url.searchParams.get('projectId') && d.meta.githubCommitSha === url.searchParams.get('sha'))
+        .filter(d => d.projectId === url.searchParams.get('projectId') &&
+          (d.meta.githubCommitSha ?? d.gitSource?.sha) === url.searchParams.get('sha'))
         .filter(d => !url.searchParams.has('state') || d.readyState === url.searchParams.get('state'))
         .map(d => ({ uid: d.id })) });
+    }
+    if (url.pathname === '/v13/deployments' && method === 'POST') {
+      assert.equal(url.searchParams.get('forceNew'), '1');
+      const source = state.deployments.get(body.deploymentId);
+      assert.deepEqual(body, { deploymentId: source.id, name: source.name, project: source.projectId, meta: { action: 'redeploy' } });
+      const refreshed = { ...source, id: 'dpl_refresh', source: 'cli', createdAt: prOpenedMs + 2000, readyState: 'BUILDING' };
+      state.deployments.set(refreshed.id, refreshed);
+      return json(refreshed);
     }
     const id = url.pathname.split('/').at(-1);
     const detail = id === 'deploy.vercel.app' ? state.eventDeployment : state.deployments.get(id);
@@ -365,6 +381,111 @@ test('reopening publishes the existing current-head preview without a new push',
   assert.equal((await f.run(pullEvent('reopened'))).state, 'published');
   assert.equal(f.state.aliases.get(host('web')).deploymentId, 'dpl_web');
   assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri]);
+});
+
+test('first-open refresh redeploys a native pre-PR Web build without enrolling or aliasing it', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  const f = fixture({ apps: [web], deployments: [old] });
+  const opened = await f.run(pullEvent('opened'));
+  assert.deepEqual(opened.results, [{ app: 'web', state: 'redeploy-requested' }]);
+  assert.deepEqual(f.writes().map(c => c.path), ['/v13/deployments']);
+  assert.equal(f.state.aliases.size, 0);
+  assert.deepEqual(f.state.clientUris.get('web-dev'), []);
+  assert.equal((await f.run()).state, 'awaiting-deployment');
+  assert.equal(f.writes().length, 1);
+  const refreshed = f.state.deployments.get('dpl_refresh');
+  refreshed.readyState = 'READY';
+  f.state.eventDeployment = refreshed;
+  assert.equal((await f.run()).state, 'published');
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, refreshed.id);
+  assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri]);
+});
+
+test('late pre-PR success finds and publishes the ready post-PR deployment instead', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  const refreshed = deployment(web, { id: 'dpl_refresh', source: 'cli' });
+  const f = fixture({ apps: [web], deployments: [old, refreshed] });
+  assert.equal((await f.run()).state, 'published');
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, refreshed.id);
+  assert.equal(f.writes().some(c => c.path === '/v13/deployments'), false);
+});
+
+test('scheduled and reopened recovery can refresh a pre-PR build that failed closed', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000, readyState: 'ERROR' });
+  for (const event of [sweep, pullEvent('reopened')]) {
+    const f = fixture({ apps: [web], deployments: [old] });
+    assert.deepEqual((await f.run(event)).results, [{ app: 'web', state: 'redeploy-requested' }]);
+    assert.deepEqual(f.writes().map(c => c.path), ['/v13/deployments']);
+  }
+});
+
+test('an ambiguous redeploy POST is sent once and a discovered build prevents repetition', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  const f = fixture({
+    apps: [web], deployments: [old],
+    intercept: ({ method, path, state }) => {
+      if (method !== 'POST' || path !== '/v13/deployments') return;
+      state.deployments.set('dpl_refresh', deployment(web, { id: 'dpl_refresh', source: 'cli', readyState: 'BUILDING', meta: {} }));
+      throw new Error('connection lost after acceptance');
+    },
+  });
+  assert.equal((await f.run(pullEvent('opened'))).state, 'failed');
+  assert.equal(f.writes().length, 1);
+  assert.equal((await f.run()).state, 'awaiting-deployment');
+  assert.equal(f.writes().length, 1);
+  assert.equal(f.state.aliases.size, 0);
+});
+
+test('pre-PR refresh refuses non-Git, prebuilt, other-branch and ambiguous deployments', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  for (const overrides of [
+    { source: 'cli' }, { prebuilt: true }, { createdAt: undefined },
+    { gitSource: { ...old.gitSource, ref: 'another-pr' } }, { gitSource: { ...old.gitSource, repoId: 1 } },
+  ]) {
+    const f = fixture({ apps: [web], deployments: [{ ...old, ...overrides }] });
+    assert.equal((await f.run(pullEvent('opened'))).state, 'awaiting-deployment');
+    assert.deepEqual(f.writes(), []);
+  }
+});
+
+test('a post-PR build missing the expected PR ID leaves callbacks and aliases untouched', async () => {
+  const post = deployment(web, { meta: { ...deployment(web).meta, githubPrId: '13' } });
+  const f = fixture({ apps: [web], deployments: [post] });
+  assert.equal((await f.run()).state, 'awaiting-deployment');
+  assert.deepEqual(f.writes(), []);
+});
+
+test('a force-push or close before the redeploy POST prevents rebuilding the old head', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  for (const pr of [closedPr, { ...basePr, head: { ...basePr.head, sha: nextSha } }]) {
+    const f = fixture({
+      apps: [web], deployments: [old],
+      intercept: ({ path, state }) => {
+        if (path === '/v7/deployments') state.pr = pr;
+      },
+    });
+    assert.deepEqual((await f.run(pullEvent('opened'))).results, [{ app: 'web', state: 'stale' }]);
+    assert.deepEqual(f.writes(), []);
+  }
+});
+
+test('apps without PR-ID dependencies can publish a pre-PR build directly', async () => {
+  for (const entry of [account, open]) {
+    const f = fixture({ apps: [entry], deployments: [deployment(entry, { createdAt: prOpenedMs - 1000 })] });
+    assert.equal((await f.run(pullEvent('opened'))).state, 'published');
+    assert.equal(f.state.aliases.get(host(entry.app)).deploymentId, `dpl_${entry.app}`);
+    assert.equal(f.writes().some(c => c.path === '/v13/deployments'), false);
+  }
+});
+
+test('daily recovery replaces a previously aliased pre-PR build only when the refresh is ready', async () => {
+  const old = deployment(web, { createdAt: prOpenedMs - 1000 });
+  const f = fixture({ apps: [web], aliases: [mapping(web)], deployments: [old] });
+  assert.deepEqual((await f.run(sweep)).results, [{ app: 'web', state: 'redeploy-requested' }]);
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, old.id);
+  f.state.deployments.get('dpl_refresh').readyState = 'READY';
+  assert.deepEqual((await f.run(sweep)).results, [{ app: 'web', state: 'published' }]);
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, 'dpl_refresh');
 });
 
 test('scheduled cleanup finds aliases and callback-only entries for former matrix apps', async () => {

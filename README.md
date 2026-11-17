@@ -323,6 +323,13 @@ and has an ordinary READY Preview deployment for its exact current head,
 repository and project. Opening or reopening a PR can reuse a matching existing
 deployment. A failed build leaves the last good alias intact.
 
+Web, Community and My Two Cents need the Vercel PR ID at build or runtime.
+When the only verified native build predates the PR, the workflow asks Vercel
+to rebuild that deployment. The workflow waits if a matching post-PR build
+already exists. It enrolls callbacks and assigns an alias only after a READY
+deployment identifies the current PR and was created after it opened.
+[Vercel system environment variables](https://vercel.com/docs/environment-variables/system-environment-variables#vercel_git_pull_request_id)
+
 Closing a PR or retargeting it away from the configured branch removes its owned
 aliases before trying Account callbacks. The daily sweep also checks all
 repo-owned projects and dev clients, including apps removed from the current
