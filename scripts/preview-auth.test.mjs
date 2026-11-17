@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { previewAuth, validateMatrix } from './preview-auth.mjs';
 
 const matrix = [
-  { app: 'web', project_id: 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV', client_id_key: 'WEB_ID', callback_paths: ['/auth/callback'], needs_neon: false },
-  { app: 'account', project_id: 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M', client_id_key: 'ACCOUNT_ID', callback_paths: ['/api/callback'], needs_neon: false },
+  { app: 'web', project_id: 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV', client_id_key: 'WEB_ID', callback_paths: ['/auth/callback'], needs_neon: true },
+  { app: 'account', project_id: 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M', client_id_key: 'ACCOUNT_ID', callback_paths: ['/api/callback'], needs_neon: true },
 ];
 const repo = 'vana-com/unity-surfaces', domain = 'vana.boo', sha = 'a'.repeat(40);
 const pr = { number: 12, state: 'open', base: { ref: 'dev' }, head: { sha, repo: { full_name: repo } } };
@@ -41,8 +41,9 @@ test('rejects malicious event URLs and foreign projects or repositories', async 
 test('does not publish old builds and removes alias if head changes during assignment', async () => {
   let f = fixture({ pull: () => ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
   assert.equal((await f.run()).state, 'ignored');
-  f = fixture({ pull: n => n === 1 ? pr : ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
-  assert.equal((await f.run()).state, 'stale');
+  const staticApp = { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', callback_paths: [], needs_neon: false };
+  f = fixture({ deployment: { projectId: staticApp.project_id }, pull: n => n === 1 ? pr : ({ ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } }) });
+  assert.equal((await f.run({ matrix: [staticApp] })).state, 'stale');
   assert.deepEqual(f.calls.filter(c => c[0] === 'alias').map(c => c[1]), ['set', 'rm']);
   assert.equal(f.calls.some(c => c[0] === 'account'), false);
 });
@@ -55,10 +56,10 @@ test('closed PR removes only exact owned aliases and callbacks; reopen prevents 
   const reopened = fixture(); await reopened.run({ eventName: 'pull_request_target', event: { action: 'closed', pull_request: pr } });
   assert.equal(reopened.calls.some(c => c[0] === 'account' || c[0] === 'alias'), false);
 });
-test('routes the matching project to its app client and blocks unprovisioned Neon', async () => {
+test('blocks unprovisioned Neon', async () => {
   const f = fixture({ deployment: { projectId: 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M' } });
-  assert.equal((await f.run()).state, 'published');
-  assert.equal(f.calls.find(c => c[0] === 'account')[3], 'account');
+  assert.equal((await f.run()).state, 'required-unavailable');
+  assert.equal(f.calls.some(c => c[0] === 'account'), false);
   const blocked = fixture();
   assert.equal((await blocked.run({ matrix: [{ ...matrix[0], needs_neon: true }] })).state, 'required-unavailable');
   assert.equal(blocked.calls.some(c => c[0] === 'alias' || c[0] === 'account'), false);
@@ -88,4 +89,20 @@ test('static app publishes and sweeps without Account API access', async () => {
   const sweep = fixture();
   await sweep.run({ eventName: 'schedule', event: {}, matrix: [staticApp] });
   assert.equal(sweep.calls.some(c => c[0] === 'account'), false);
+});
+
+test('cannot disable required database isolation in caller matrix', async () => {
+  const f = fixture();
+  await assert.rejects(f.run({ matrix: [{ ...matrix[0], needs_neon: false }] }));
+  assert.deepEqual(f.calls, []);
+});
+
+test('routes a matching non-database project to its client key', async () => {
+  const apps = [
+    { app: 'mobile', project_id: 'prj_f3Hqy5lTO7KPRl9wVDNyhKEp5oGf', client_id_key: 'MOBILE_ID', callback_paths: ['/callback'], needs_neon: false },
+    { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', client_id_key: 'OPEN_ID', callback_paths: ['/callback'], needs_neon: false },
+  ];
+  const f = fixture({ deployment: { projectId: apps[1].project_id } });
+  assert.equal((await f.run({ matrix: apps })).state, 'published');
+  assert.equal(f.calls.find(c => c[0] === 'account')[3], 'open');
 });

@@ -15,6 +15,7 @@ export const APP_OWNERS = Object.freeze({
   open: ['vana-com/unity-surfaces', 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja'],
   'my-two-cents': ['vana-com/my-two-cents', 'prj_u5iiNxoAsSv2bSJN0K45tjr9DB01'],
 });
+const NEON_REQUIRED = new Set(['web', 'account', 'community']);
 
 export function previewHost(app, pr, domain) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(app) || app.length > 40 ||
@@ -34,6 +35,7 @@ export function validateMatrix(matrix, domain, repo) {
     previewHost(app.app, 1, domain);
     const owner = APP_OWNERS[app.app];
     if (!owner || owner[0] !== repo || owner[1] !== app.project_id || projects.has(app.project_id) || apps.has(app.app) ||
+        (NEON_REQUIRED.has(app.app) && app.needs_neon !== true) ||
         typeof app.needs_neon !== 'boolean' || !Array.isArray(app.callback_paths) ||
         (app.callback_paths.length > 0 ? !/^[A-Z][A-Z0-9_]*$/.test(app.client_id_key ?? '') : app.client_id_key != null) ||
         app.callback_paths.some(path => typeof path !== 'string' || !/^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/.test(path))) {
