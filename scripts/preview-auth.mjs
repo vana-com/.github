@@ -148,7 +148,9 @@ export async function resolveSignalPulls(repo, event, api) {
   return verified;
 }
 
-export async function previewAuth({ eventName, event, repo, matrix, domain, targetBranch, decommission = false, api, alias }) {
+export async function previewAuth({
+  eventName, event, repo, matrix, domain, targetBranch, decommission = false, reportBuildOutcome = false, api, alias,
+}) {
   if (eventName === 'workflow_run' && !decommission) {
     const prs = await resolveSignalPulls(repo, event, api);
     const outcomes = [];
@@ -156,6 +158,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
       const action = pr.state === 'open' && pr.base?.ref === targetBranch ? 'reopened' : 'closed';
       outcomes.push(await previewAuth({
         eventName: 'pull_request_target', event: { action, pull_request: pr }, repo, matrix, domain, targetBranch, api, alias,
+        reportBuildOutcome: event.workflow_run.event === 'deployment_status',
       }));
     }
     const failures = outcomes.flatMap(result => result.failures ?? []);
@@ -312,14 +315,19 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     const publishable = deployment => eligibleDeployment(deployment, app, sha) &&
       (!needsPrContext || hasPrContext(deployment, pr));
     if (reported && publishable(reported)) return publish(app, pr.number, reported, publishOptions);
-    const readyFilter = needsPrContext ? '' : '&state=READY';
+    const readyFilter = needsPrContext || reportBuildOutcome ? '' : '&state=READY';
     const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}${readyFilter}`, null, app);
     const ids = new Set([reported?.id, ...candidates.map(item => item.uid)]);
-    let source, newerBuild = false;
+    let source, latest, newerBuild = false;
     for (const id of ids) {
       if (!id) continue;
       const deployment = id === reported?.id ? reported : await readTarget(id);
-      if (publishable(deployment)) return publish(app, pr.number, deployment, publishOptions);
+      if (!reportBuildOutcome && publishable(deployment)) return publish(app, pr.number, deployment, publishOptions);
+      if (reportBuildOutcome && ownedDeployment(deployment, app) && deployment.meta.githubCommitSha === sha &&
+          (!needsPrContext || hasPrContext(deployment, pr) || (beforePr(deployment, pr) === false && sameGitHead(deployment, pr))) &&
+          (!latest || (deployment.createdAt ?? 0) > (latest.createdAt ?? 0))) {
+        latest = deployment;
+      }
       if (!needsPrContext || !isProjectPreview(deployment, app) || !sameGitHead(deployment, pr)) continue;
       const prePr = beforePr(deployment, pr);
       if (prePr === false) newerBuild = true;
@@ -329,6 +337,15 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
           /^dpl_[A-Za-z0-9]+$/.test(deployment.id ?? '') && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(deployment.name ?? '')) {
         source = deployment;
       }
+    }
+    if (latest) {
+      if (publishable(latest)) return publish(app, pr.number, latest, publishOptions);
+      if (['ERROR', 'CANCELED'].includes(latest.readyState)) {
+        if (!currentHead(await pull(pr.number), sha)) return 'stale';
+        if (latest.readyState === 'ERROR') throw new PreviewError('Deployment failed');
+        return 'deployment-canceled';
+      }
+      return 'awaiting-deployment';
     }
     if (newerBuild) return 'awaiting-deployment';
     if (!source) return null;

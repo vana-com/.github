@@ -198,6 +198,33 @@ test('workflow_run publishes only after matching the signal to a fresh same-repo
   assert.equal(f.writes().length, writes);
 });
 
+test('workflow_run reports the latest failed build while preserving its alias and publishing a sibling app', async () => {
+  const lastGood = deployment(web, { id: 'dpl_last_good', meta: { ...deployment(web).meta, githubCommitSha: nextSha } });
+  const olderReady = deployment(web, { id: 'dpl_earlier', createdAt: prOpenedMs + 1500 });
+  const failure = deployment(web, { id: 'dpl_failed', readyState: 'ERROR', createdAt: prOpenedMs + 2000 });
+  const f = fixture({
+    apps: [web, open], aliases: [mapping(web, lastGood.id)],
+    deployments: [lastGood, olderReady, failure, deployment(open)],
+  });
+  const result = await f.run(signal({ event: 'deployment_status' }));
+  assert.equal(result.state, 'failed');
+  assert.deepEqual(result.failures.map(item => [item.app, item.reason]), [['web', 'Deployment failed']]);
+  assert.deepEqual(result.results, [{ app: 'open', state: 'published' }]);
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, lastGood.id);
+  assert.equal(f.state.aliases.get(host('open')).deploymentId, 'dpl_open');
+});
+
+test('workflow_run reports a non-PR-ID app build failure and treats canceled apps as skipped', async () => {
+  const canceled = deployment(open, { readyState: 'CANCELED' });
+  const failure = deployment(account, { readyState: 'ERROR' });
+  const f = fixture({ apps: [web, account, open], deployments: [deployment(web), canceled, failure] });
+  const result = await f.run(signal({ event: 'deployment_status' }));
+  assert.equal(result.state, 'failed');
+  assert.deepEqual(result.failures.map(item => [item.app, item.reason]), [['account', 'Deployment failed']]);
+  assert.deepEqual(result.results, [{ app: 'web', state: 'published' }, { app: 'open', state: 'deployment-canceled' }]);
+  assert.deepEqual([...f.state.aliases.keys()], [host('web')]);
+});
+
 test('workflow_run skips fork, foreign workflow and malformed signal metadata before any service request', async () => {
   for (const details of [
     { head_repository: { full_name: 'fork/unity-surfaces' } },
