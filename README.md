@@ -280,13 +280,16 @@ jobs:
       doppler_project: preview-automation
       doppler_config: dev
       app_matrix: >-
-        [{"app":"web","project_id":"prj_example","client_id_key":"WEB_CLIENT_ID","callback_paths":["/auth/callback"],"needs_neon":true}]
+        [{"app":"web","project_id":"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV","client_id_key":"WEB_CLIENT_ID","callback_paths":["/auth/callback"],"needs_neon":true}]
     secrets: inherit
 ```
 
-Each matrix entry names a unique app and Vercel project, one or more exact
-callback paths, the Doppler secret name holding that app's Account client ID,
-and whether it needs Neon. `domain` defaults to `vana.boo`;
+Each matrix entry names an app and Vercel project, exact callback paths and
+whether it needs Neon. An org-owned manifest in the trusted script binds each
+app name to its repository and project so another repository cannot claim its
+aliases. Changes to that ownership require a reviewed update here. For apps
+with callbacks, `client_id_key` names the Doppler secret holding the Account
+client ID. Apps without callbacks use `callback_paths: []` and omit that key. `domain` defaults to `vana.boo`;
 `account_wiring_mode` currently accepts only `existing-clients`. Only open,
 same-repository PRs targeting `target_branch` and deployments with the current
 exact PR head, matching repository and project, and ordinary Preview target
@@ -296,8 +299,8 @@ left alone. The deployment URL is validated against Vercel before use.
 
 Create a `preview-auth` environment in the caller and put its scoped Doppler
 service token in `DOPPLER_PREVIEW_TOKEN`. The selected Doppler project and
-config supply `VERCEL_TOKEN`, `TEAM_ID`, `ACCOUNT_ADMIN_TOKEN`,
-`ACCOUNT_ORIGIN` and every matrix `client_id_key`. Configure the identity with
+config supply `VERCEL_TOKEN` and `TEAM_ID`. Apps with callbacks also require
+`ACCOUNT_ADMIN_TOKEN`, `ACCOUNT_ORIGIN` and each matrix `client_id_key`. Configure the identity with
 only the nonproduction access it needs. Set repository variable
 `PREVIEW_AUTH_ENABLED` to `true` only after the setup above is complete.
 Caller and reusable pins must be reviewed and updated together; the reusable
