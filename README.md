@@ -243,21 +243,38 @@ for trusted Vercel Preview deployments. It never checks out or runs caller PR
 code on its credential-bearing runner. It serializes all apps in a calling
 repository because Account updates replace a client's redirect list. Use
 separate Account clients for repositories: GitHub concurrency does not lock
-across repositories.
+across repositories. Mobile previews run in a browser only; native deep links
+and association files are not supported.
+
+The caller workflow and app matrix used by credentialed runs come from the
+caller default branch (`main`), not the PR. Changes take effect only after
+merge to `main` and a reviewed update of the organization workflow SHA.
+Trusted logic is pinned to an immutable commit; PR app code is never installed
+or built on the credentialed runner.
 
 **Neon provisioning is not implemented.** Apps with `needs_neon: true` fail
 closed before alias or callback changes; their PR events report
 `required-unavailable`. A later trusted provisioning implementation must
 validate the owned, isolated database before publishing. This workflow alone
-cannot deliver database-backed previews or trigger their builds.
+cannot provision isolated preview databases or trigger builds.
 
-Deployment status and scheduled workflows run only when their caller workflow
-exists on the repository's default branch. Adding a caller only to `dev` does
-not enable those events while `main` remains the default branch. Do not enable
-this workflow until the caller is on the default branch and the required
-provisioning, deployment, Account and DNS setup has been verified.
+Step 0 uses existing dev databases and `account-dev` for all apps, with
+`needs_neon: false` until Step 1. A missing migration path never blocks Step 0.
+Neon provisioning remains future work. Verify deployment, Account and DNS setup
+before enabling the workflow.
 
-A repository owner adds a caller pinned to a reviewed commit of this repository:
+Deployment status and scheduled workflows require the caller on the default
+branch. Base the thin Unity caller PR on `main`; preview deployments qualify
+when their app PR targets `dev`.
+
+To opt in:
+
+1. Create the `preview-auth` GitHub environment and add a per-repository Doppler
+   read service token as `DOPPLER_PREVIEW_TOKEN`.
+2. Add the thin caller below, pinned to a reviewed SHA, with `secrets: inherit`
+   and the repository app matrix.
+3. After verifying setup, set the repository variable `PREVIEW_AUTH_ENABLED`
+   to `true`.
 
 ```yaml
 name: Preview auth
@@ -280,7 +297,7 @@ jobs:
       doppler_project: preview-automation
       doppler_config: dev
       app_matrix: >-
-        [{"app":"web","project_id":"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV","client_id_key":"WEB_CLIENT_ID","callback_paths":["/auth/callback"],"needs_neon":true}]
+        [{"app":"web","project_id":"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV","client_id_key":"WEB_CLIENT_ID","callback_paths":["/auth/callback"],"needs_neon":false}]
     secrets: inherit
 ```
 
@@ -302,14 +319,12 @@ in the same project and repository. If none is available, it reports the host
 and fails the job so a new push can trigger a build. Existing targets are not
 replaced merely because a newer build is unavailable.
 
-Create a `preview-auth` environment in the caller and put its scoped Doppler
-service token in `DOPPLER_PREVIEW_TOKEN`. The selected Doppler project and
-config supply `VERCEL_TOKEN` and `TEAM_ID`. Apps with callbacks also require
-`ACCOUNT_ADMIN_TOKEN`, `ACCOUNT_ORIGIN` and each matrix `client_id_key`. Configure the identity with
-only the nonproduction access it needs. Set repository variable
-`PREVIEW_AUTH_ENABLED` to `true` only after the setup above is complete.
-Caller and reusable pins must be reviewed and updated together; the reusable
-checks out its own trusted script at a separate immutable commit.
+The selected Doppler project and config supply `VERCEL_TOKEN` and `TEAM_ID`.
+Apps with callbacks also require `ACCOUNT_ADMIN_TOKEN`, `ACCOUNT_ORIGIN` and
+each matrix `client_id_key`. Configure the identity with only the
+nonproduction access it needs. Caller and reusable pins must be
+reviewed and updated together; the reusable checks out its own trusted script
+at a separate immutable commit.
 
 Run `node --test scripts/preview-auth.test.mjs` for the local lifecycle tests.
 These tests use API doubles; they do not prove a live Vercel, Doppler or Account
