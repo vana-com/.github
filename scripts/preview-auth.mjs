@@ -195,7 +195,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     await api('account', '/redirect-uris', { action, redirect_uri: uri }, app);
   }
 
-  async function publish(app, pr, deployment, expiredAlias) {
+  async function publish(app, pr, deployment, { expiredAlias, onlyMissingAlias = false } = {}) {
     const sha = deployment.meta.githubCommitSha;
     if (!currentHead(await pull(pr), sha)) return 'stale';
     const state = provisioningState(app);
@@ -208,6 +208,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
       });
     };
     const existing = await readAlias(host);
+    if (onlyMissingAlias && existing) return 'alias-exists';
     if (existing && existing.deploymentId !== deployment.id) {
       const target = await readTarget(existing.deploymentId);
       const knownExpired = !target && expiredAlias && existing.uid === expiredAlias.uid &&
@@ -235,7 +236,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   }
 
   async function findDeployment(app, sha) {
-    const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}`, null, app);
+    const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}&state=READY`, null, app);
     for (const { uid } of candidates) {
       if (!uid) continue;
       const deployment = await readTarget(uid);
@@ -267,10 +268,12 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     const onlyPr = cleanupEvent ? String(event.pull_request.number) : null;
     if (onlyPr && !PR_NUMBER.test(onlyPr)) throw new PreviewError('Invalid pull request number');
     const repair = [];
+    const aliasHostsByApp = new Map();
     // Clean every owned Vercel project before trying Account, even when the matrix has drifted.
     for (const app of ownedApps) {
       const aliases = onlyPr ? [{ alias: previewHost(app.app, onlyPr, domain) }]
         : await attempt(app.app, 'list aliases', () => api('vercel', '/aliases', null, app));
+      if (sweep && aliases) aliasHostsByApp.set(app.app, new Set(aliases.map(item => item.alias)));
       for (const item of aliases ?? []) {
         const pr = ownedPr(item.alias, app.app, domain);
         if (!pr) continue;
@@ -309,9 +312,42 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
         if (!replacement || provisioningState(app) !== 'not-required') { pushNeeded.add(host); return; }
         const latest = await readAlias(host);
         if (latest?.uid !== existing.uid || latest?.deploymentId !== existing.deploymentId) return;
-        const state = await publish(app, pr, replacement, existing);
+        const state = await publish(app, pr, replacement, { expiredAlias: existing });
         results.push({ app: app.app, state });
       });
+    }
+
+    if (sweep && !decommission) {
+      // An interrupted first publish can leave neither an alias nor a callback.
+      const perPage = 100;
+      const openPulls = `/repos/${repo}/pulls?state=open&base=${encodeURIComponent(targetBranch)}&sort=created&direction=asc&per_page=${perPage}`;
+      for (let page = 1; ; page++) {
+        const prs = await attempt('GitHub', 'list open pull requests', async () => {
+          const listed = await api('github', `${openPulls}&page=${page}`);
+          if (!Array.isArray(listed)) throw new PreviewError('GitHub returned an invalid pull request list');
+          return listed;
+        });
+        if (!prs?.length) break;
+        for (const pr of prs) {
+          if (!eligiblePr(pr) || !SHA.test(pr.head?.sha ?? '') || !PR_NUMBER.test(String(pr.number))) continue;
+          for (const app of byApp.values()) {
+            const aliases = aliasHostsByApp.get(app.app);
+            if (!aliases || provisioningState(app) !== 'not-required') continue;
+            const host = previewHost(app.app, pr.number, domain);
+            if (aliases.has(host)) continue;
+            await attempt(app.app, `recover PR #${pr.number} preview`, async () => {
+              const deployment = await findDeployment(app, pr.head.sha);
+              if (!deployment) return;
+              const state = await publish(app, pr.number, deployment, { onlyMissingAlias: true });
+              if (state === 'published') {
+                aliases.add(host);
+                results.push({ app: app.app, state });
+              }
+            });
+          }
+        }
+        if (prs.length < perPage) break;
+      }
     }
     return finish(decommission ? 'decommissioned' : pushNeeded.size ? 'push-needed' : 'cleanup-checked');
   }

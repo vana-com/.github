@@ -54,7 +54,9 @@ function fixture({
     const response = await intercept?.({ ...call, url, state });
     if (response) return response;
     if (url.origin === 'https://api.github.com') {
-      if (url.pathname.endsWith('/pulls')) return json([basePr]);
+      if (url.pathname.endsWith('/pulls')) {
+        return json(url.searchParams.get('state') === 'open' ? [state.pr].filter(pr => pr.state === 'open') : [basePr]);
+      }
       assert.match(url.pathname, /\/pulls\/12$/);
       return json(state.pr);
     }
@@ -95,6 +97,7 @@ function fixture({
     if (url.pathname === '/v7/deployments') {
       return json({ deployments: [...state.deployments.values()]
         .filter(d => d.projectId === url.searchParams.get('projectId') && d.meta.githubCommitSha === url.searchParams.get('sha'))
+        .filter(d => !url.searchParams.has('state') || d.readyState === url.searchParams.get('state'))
         .map(d => ({ uid: d.id })) });
     }
     const id = url.pathname.split('/').at(-1);
@@ -381,6 +384,75 @@ test('scheduled cleanup removes callback-only closed PRs and keeps unrelated exa
   const f = fixture({ pr: closedPr, clientUris: { 'web-dev': [webUri, unknownPath, 'https://unrelated.example/auth/callback'] } });
   assert.equal((await f.run(sweep)).state, 'cleanup-checked');
   assert.deepEqual(f.state.clientUris.get('web-dev'), [unknownPath, 'https://unrelated.example/auth/callback']);
+});
+
+test('daily sweep publishes a verified build whose deployment event left no artifacts', async () => {
+  const f = fixture();
+  const result = await f.run(sweep);
+  assert.equal(result.state, 'cleanup-checked');
+  assert.deepEqual(result.results, [{ app: 'web', state: 'published' }]);
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, 'dpl_web');
+  assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri]);
+  assert.equal(f.state.aliases.size, 1);
+});
+
+test('daily sweep repairs an Account outage before the first alias or callback', async () => {
+  let accountDown = true;
+  const f = fixture({
+    apps: [web],
+    intercept: ({ origin }) => accountDown && origin === 'https://account-dev.vana.org' ? json({}, 503) : undefined,
+  });
+  assert.equal((await f.run()).state, 'failed');
+  assert.deepEqual(f.writes(), []);
+  accountDown = false;
+  assert.equal((await f.run(sweep)).state, 'cleanup-checked');
+  assert.equal(f.state.aliases.get(host('web')).deploymentId, 'dpl_web');
+  assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri]);
+});
+
+test('daily recovery paginates open PRs and ignores fork or retargeted PRs', async () => {
+  const fork = { ...basePr, number: 13, head: { ...basePr.head, repo: { full_name: 'fork/unity-surfaces' } } };
+  const retargeted = { ...basePr, number: 14, base: { ref: 'main' } };
+  const pages = [];
+  const f = fixture({
+    apps: [web],
+    intercept: ({ url }) => {
+      if (url.searchParams.get('state') !== 'open') return;
+      const page = Number(url.searchParams.get('page'));
+      const perPage = Number(url.searchParams.get('per_page'));
+      assert.equal(url.searchParams.get('base'), 'dev');
+      assert.ok(perPage > 0);
+      pages.push(page);
+      return json(page === 1 ? Array.from({ length: perPage }, () => fork) : [retargeted, basePr]);
+    },
+  });
+  assert.equal((await f.run(sweep)).state, 'cleanup-checked');
+  assert.deepEqual(pages, [1, 2]);
+  assert.deepEqual([...f.state.aliases.keys()], [host('web')]);
+});
+
+test('daily recovery preserves a last good alias even when GitHub has a newer eligible build', async () => {
+  const previous = deployment(web, { id: 'dpl_previous', meta: { ...deployment(web).meta, githubCommitSha: nextSha } });
+  for (const aliasInList of [true, false]) {
+    const f = fixture({
+      apps: [web], aliases: [mapping(web, previous.id)], deployments: [deployment(web), previous],
+      intercept: ({ path }) => !aliasInList && path === '/v4/aliases' ? json({ aliases: [] }) : undefined,
+    });
+    assert.equal((await f.run(sweep)).state, 'cleanup-checked');
+    assert.equal(f.state.aliases.get(host('web')).deploymentId, previous.id);
+    assert.deepEqual(f.writes(), []);
+  }
+});
+
+test('daily recovery rechecks the PR head after reading the deployment', async () => {
+  const f = fixture({
+    apps: [web],
+    intercept: ({ path, state }) => {
+      if (path === '/v7/deployments') state.pr = { ...basePr, head: { ...basePr.head, sha: nextSha } };
+    },
+  });
+  assert.equal((await f.run(sweep)).state, 'cleanup-checked');
+  assert.deepEqual(f.writes(), []);
 });
 
 test('decommission drains open PR artifacts across the full repo namespace and is idempotent', async () => {

@@ -326,9 +326,11 @@ deployment. A failed build leaves the last good alias intact.
 Closing a PR or retargeting it away from the configured branch removes its owned
 aliases before trying Account callbacks. The daily sweep also checks all
 repo-owned projects and dev clients, including apps removed from the current
-matrix. It repairs a missing deployment target only when a READY same-project,
-same-repository deployment for the open PR's current head is available. A job
-reports hosts that need a new build.
+matrix. It also checks open PRs for a missed first publication. The sweep can
+publish a missing alias or repair an expired target when a READY deployment
+matches the open PR's current head, repository and app project. It reports
+expired aliases that need a new build. Newly opened PRs and unaffected apps
+without a matching build wait for the next deployment.
 
 To retire a caller, set the repository variable `PREVIEW_AUTH_DECOMMISSION` to
 `true` and let existing preview jobs settle. Run the caller manually with
