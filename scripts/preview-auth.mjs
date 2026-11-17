@@ -65,6 +65,10 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   if (!targetBranch || !/^[A-Za-z0-9._/-]+$/.test(targetBranch)) throw new Error('Invalid target branch');
   const pull = number => api('github', `/repos/${repo}/pulls/${number}`);
   const currentHead = (pr, sha) => pr?.state === 'open' && pr.head?.repo?.full_name === repo && pr.head?.sha === sha && pr.base?.ref === targetBranch;
+  const eligibleDeployment = (deployment, app, sha) => deployment?.projectId === app.project_id &&
+    deployment.readyState === 'READY' && deployment.target !== 'production' && !deployment.customEnvironment &&
+    `${deployment.meta?.githubCommitOrg}/${deployment.meta?.githubCommitRepo}` === repo &&
+    deployment.meta?.githubCommitSha === sha;
   async function callback(app, pr, action) {
     for (const path of app.callback_paths) await api('account', '/redirect-uris', {
       action, redirect_uri: `https://${previewHost(app.app, pr, domain)}${path}`,
@@ -72,7 +76,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   }
   async function remove(app, pr, aliases) {
     const current = await pull(pr);
-    if (current?.state === 'open') return;
+    if (current?.state === 'open' && current.base?.ref === targetBranch && current.head?.repo?.full_name === repo) return;
     await callback(app, pr, 'remove');
     const host = previewHost(app.app, pr, domain);
     if (aliases.some(a => a.alias === host)) await alias('rm', host, null, app);
@@ -90,6 +94,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
     return { state: 'cleanup-checked' };
   }
   if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+    const pushNeeded = [];
     for (const app of matrix) {
       const aliases = await api('vercel', '/aliases', null, app);
       const client = app.callback_paths.length ? await api('account', '', null, app) : {};
@@ -100,9 +105,31 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
         const pr = ownedPr(url.hostname, app.app, domain);
         if (pr && app.callback_paths.some(path => uri === `https://${previewHost(app.app, pr, domain)}${path}`)) prs.add(pr);
       }
-      for (const pr of prs) await remove(app, pr, aliases);
+      for (const pr of prs) {
+        const current = await pull(pr);
+        if (!currentHead(current, current?.head?.sha)) { await remove(app, pr, aliases); continue; }
+        const host = previewHost(app.app, pr, domain);
+        const existing = aliases.find(a => a.alias === host);
+        if (!existing) continue;
+        // An absent ID is ambiguous; do not overwrite an alias whose target we cannot inspect.
+        if (!existing.deploymentId) { pushNeeded.push(host); continue; }
+        const target = await api('vercel', `/deployments/${encodeURIComponent(existing.deploymentId)}`, null, app);
+        if (target?.readyState === 'READY') continue;
+        if (target) { pushNeeded.push(host); continue; }
+        const sha = current.head.sha;
+        const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}`, null, app);
+        let replacement;
+        for (const candidate of candidates) {
+          const detail = await api('vercel', `/deployments/${encodeURIComponent(candidate.uid)}`, null, app);
+          if (eligibleDeployment(detail, app, sha)) { replacement = detail; break; }
+        }
+        if (!replacement || provisioningState(app) !== 'not-required') { pushNeeded.push(host); continue; }
+        if (!currentHead(await pull(pr), sha)) continue;
+        await alias('set', host, replacement.id, app);
+        if (!currentHead(await pull(pr), sha)) await alias('rm', host, null, app);
+      }
     }
-    return { state: 'cleanup-checked' };
+    return { state: pushNeeded.length ? 'push-needed' : 'cleanup-checked', pushNeeded };
   }
   if (eventName !== 'deployment_status' || event.deployment_status?.state !== 'success') return { state: 'ignored' };
   let url;
@@ -112,9 +139,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   if (!/^[a-f0-9]{40}$/.test(event.deployment?.sha ?? '')) return { state: 'ignored' };
   const deployment = await api('vercel', `/deployments/${encodeURIComponent(url.hostname)}`);
   const app = matrix.find(item => item.project_id === deployment.projectId);
-  if (!app || deployment.readyState !== 'READY' || deployment.target === 'production' || deployment.customEnvironment ||
-      `${deployment.meta?.githubCommitOrg}/${deployment.meta?.githubCommitRepo}` !== repo ||
-      deployment.meta?.githubCommitSha !== event.deployment?.sha) return { state: 'ignored' };
+  if (!app || !eligibleDeployment(deployment, app, event.deployment.sha)) return { state: 'ignored' };
   const matches = await api('github', `/repos/${repo}/commits/${event.deployment.sha}/pulls`);
   const pr = matches.find(p => currentHead(p, event.deployment.sha));
   if (!pr || !currentHead(await pull(pr.number), event.deployment.sha)) return { state: 'ignored' };
@@ -147,12 +172,13 @@ async function main() {
     account = new URL(env.ACCOUNT_ORIGIN);
     if (account.protocol !== 'https:' || account.origin !== env.ACCOUNT_ORIGIN) throw new Error('Invalid ACCOUNT_ORIGIN');
   }
-  async function request(base, path, token, body) {
+  async function request(base, path, token, body, allowMissing = false) {
     const response = await fetch(base + path, {
       method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    if (allowMissing && response.status === 404) return null;
     if (!response.ok) throw new Error(`Preview auth API request failed (${response.status})`);
     return response.json();
   }
@@ -168,7 +194,16 @@ async function main() {
       } while (until);
       return aliases;
     }
-    return request('https://api.vercel.com', `/v13${path}?teamId=${encodeURIComponent(env.TEAM_ID)}`, env.VERCEL_TOKEN);
+    if (path.startsWith('/deployments?sha=')) {
+      const deployments = []; let until = '';
+      do {
+        const page = await request('https://api.vercel.com', `/v7/deployments?teamId=${encodeURIComponent(env.TEAM_ID)}&projectId=${encodeURIComponent(app.project_id)}&limit=100&${path.split('?')[1]}${until}`, env.VERCEL_TOKEN);
+        deployments.push(...page.deployments);
+        until = page.pagination?.next ? `&until=${encodeURIComponent(page.pagination.next)}` : '';
+      } while (until);
+      return deployments;
+    }
+    return request('https://api.vercel.com', `/v13${path}?teamId=${encodeURIComponent(env.TEAM_ID)}`, env.VERCEL_TOKEN, null, true);
   };
   const alias = async (action, host, deployment) => {
     const config = mkdtempSync(join(tmpdir(), 'preview-auth-'));
@@ -182,7 +217,8 @@ async function main() {
   const result = await previewAuth({ eventName: env.GITHUB_EVENT_NAME, event: JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8')),
     repo: env.GITHUB_REPOSITORY, matrix, domain: env.PREVIEW_DOMAIN, targetBranch: env.TARGET_BRANCH, api, alias });
   console.log(`Preview auth: ${result.state}${result.app ? ` (${result.app})` : ''}`);
-  if (result.state === 'required-unavailable') process.exitCode = 1;
+  for (const host of result.pushNeeded ?? []) console.log(`Preview needs a new push: ${host}`);
+  if (result.state === 'required-unavailable' || result.state === 'push-needed') process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(() => {
   console.error('Preview auth failed; check trusted configuration and API access'); process.exitCode = 1;

@@ -106,3 +106,29 @@ test('routes a matching non-database project to its client key', async () => {
   assert.equal((await f.run({ matrix: apps })).state, 'published');
   assert.equal(f.calls.find(c => c[0] === 'account')[3], 'open');
 });
+
+test('sweep repairs missing targets only with a verified current-head deployment', async () => {
+  const app = { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', callback_paths: [], needs_neon: false };
+  const good = { id: 'dpl_good', projectId: app.project_id, readyState: 'READY', meta: { githubCommitOrg: 'vana-com', githubCommitRepo: 'unity-surfaces', githubCommitSha: sha } };
+  const host = 'open-pr-12.vana.boo';
+  async function run({ details = { dpl_good: good }, pulls = () => pr, target = null } = {}) {
+    const calls = []; let reads = 0;
+    const api = async (service, path) => {
+      if (service === 'github') return pulls(++reads);
+      if (path === '/aliases') return [{ alias: host, deploymentId: 'dpl_old' }];
+      if (path === '/deployments/dpl_old') return target;
+      if (path.startsWith('/deployments?')) return Object.keys(details).map(uid => ({ uid }));
+      return details[path.split('/').pop()];
+    };
+    const result = await previewAuth({ eventName: 'schedule', event: {}, repo, matrix: [app], domain, targetBranch: 'dev', api, alias: async (...args) => calls.push(args) });
+    return { result, calls };
+  }
+  let f = await run(); assert.equal(f.result.state, 'cleanup-checked'); assert.equal(f.calls[0][2], 'dpl_good');
+  f = await run({ pulls: n => n === 1 ? pr : { ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } } }); assert.equal(f.calls.length, 0);
+  f = await run({ pulls: n => n < 3 ? pr : { ...pr, head: { ...pr.head, sha: 'b'.repeat(40) } } }); assert.deepEqual(f.calls.map(c => c[0]), ['set', 'rm']);
+  f = await run({ details: { foreign: { ...good, projectId: 'foreign' }, old: { ...good, meta: { ...good.meta, githubCommitSha: 'b'.repeat(40) } } } }); assert.equal(f.result.state, 'push-needed'); assert.equal(f.calls.length, 0);
+  f = await run({ details: {} }); assert.deepEqual(f.result.pushNeeded, [host]);
+  f = await run({ target: { readyState: 'READY' } }); assert.equal(f.calls.length, 0);
+  f = await run({ pulls: () => ({ ...pr, base: { ref: 'main' } }) }); assert.deepEqual(f.calls.map(c => c[0]), ['rm']);
+  f = await run({ pulls: () => ({ ...pr, state: 'closed' }) }); assert.deepEqual(f.calls.map(c => c[0]), ['rm']);
+});

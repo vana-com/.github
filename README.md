@@ -295,7 +295,12 @@ same-repository PRs targeting `target_branch` and deployments with the current
 exact PR head, matching repository and project, and ordinary Preview target
 qualify. Closing a PR or running the daily sweep removes exact owned aliases
 and callbacks after checking that the PR is still closed. Reopened PRs are
-left alone. The deployment URL is validated against Vercel before use.
+left alone. The deployment URL is validated against Vercel before use. The
+daily sweep also checks retained alias targets. If a target is missing, it
+repairs the alias only to a READY Preview deployment for the current PR head
+in the same project and repository. If none is available, it reports the host
+and fails the job so a new push can trigger a build. Existing targets are not
+replaced merely because a newer build is unavailable.
 
 Create a `preview-auth` environment in the caller and put its scoped Doppler
 service token in `DOPPLER_PREVIEW_TOKEN`. The selected Doppler project and
