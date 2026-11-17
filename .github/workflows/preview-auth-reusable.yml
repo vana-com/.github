@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: vana-com/.github
-          ref: 0675d06fbc69f6038463bfaa8e99f331ae62c8c4
+          ref: 43a77b0040425749ead609f823e7daf9d529a50f
           path: trusted-preview-auth
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
