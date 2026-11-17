@@ -235,3 +235,74 @@ The repository root is [MIT licensed](LICENSE). The isolated
 [`scripts/evm-key-liveness`](scripts/evm-key-liveness) adaptation is
 [Apache-2.0 licensed](scripts/evm-key-liveness/LICENSE); its
 [NOTICE](scripts/evm-key-liveness/NOTICE) preserves the source attribution.
+
+## Preview authentication control plane
+
+The reusable preview workflow enrolls exact callback URLs and assigns aliases
+for trusted Vercel Preview deployments. It never checks out or runs caller PR
+code on its credential-bearing runner. It serializes all apps in a calling
+repository because Account updates replace a client's redirect list. Use
+separate Account clients for repositories: GitHub concurrency does not lock
+across repositories.
+
+**Neon provisioning is not implemented.** Apps with `needs_neon: true` fail
+closed before alias or callback changes; their PR events report
+`required-unavailable`. A later trusted provisioning implementation must
+validate the owned, isolated database before publishing. This workflow alone
+cannot deliver database-backed previews or trigger their builds.
+
+Deployment status and scheduled workflows run only when their caller workflow
+exists on the repository's default branch. Adding a caller only to `dev` does
+not enable those events while `main` remains the default branch. Do not enable
+this workflow until the caller is on the default branch and the required
+provisioning, deployment, Account and DNS setup has been verified.
+
+A repository owner adds a caller pinned to a reviewed commit of this repository:
+
+```yaml
+name: Preview auth
+on:
+  deployment_status:
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed]
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: read
+jobs:
+  preview:
+    uses: vana-com/.github/.github/workflows/preview-auth-reusable.yml@<reviewed-40-character-sha>
+    with:
+      target_branch: dev
+      doppler_project: preview-automation
+      doppler_config: dev
+      app_matrix: >-
+        [{"app":"web","project_id":"prj_example","client_id_key":"WEB_CLIENT_ID","callback_paths":["/auth/callback"],"needs_neon":true}]
+    secrets: inherit
+```
+
+Each matrix entry names a unique app and Vercel project, one or more exact
+callback paths, the Doppler secret name holding that app's Account client ID,
+and whether it needs Neon. `domain` defaults to `vana.boo`;
+`account_wiring_mode` currently accepts only `existing-clients`. Only open,
+same-repository PRs targeting `target_branch` and deployments with the current
+exact PR head, matching repository and project, and ordinary Preview target
+qualify. Closing a PR or running the daily sweep removes exact owned aliases
+and callbacks after checking that the PR is still closed. Reopened PRs are
+left alone. The deployment URL is validated against Vercel before use.
+
+Create a `preview-auth` environment in the caller and put its scoped Doppler
+service token in `DOPPLER_PREVIEW_TOKEN`. The selected Doppler project and
+config supply `VERCEL_TOKEN`, `TEAM_ID`, `ACCOUNT_ADMIN_TOKEN`,
+`ACCOUNT_ORIGIN` and every matrix `client_id_key`. Configure the identity with
+only the nonproduction access it needs. Set repository variable
+`PREVIEW_AUTH_ENABLED` to `true` only after the setup above is complete.
+Caller and reusable pins must be reviewed and updated together; the reusable
+checks out its own trusted script at a separate immutable commit.
+
+Run `node --test scripts/preview-auth.test.mjs` for the local lifecycle tests.
+These tests use API doubles; they do not prove a live Vercel, Doppler or Account
+integration, nor do they provision databases.
