@@ -359,7 +359,9 @@ deployment identifies the current PR and was created after it opened.
 [Vercel system environment variables](https://vercel.com/docs/environment-variables/system-environment-variables#vercel_git_pull_request_id)
 
 Closing a PR or retargeting it away from the configured branch removes its owned
-aliases before trying Account callbacks. The daily sweep also checks all
+aliases before trying Account callbacks. Closed PR callbacks are identified by
+the owned app/PR hostname, including historical paths removed from the matrix.
+The daily sweep also checks all
 repo-owned projects and dev clients, including apps removed from the current
 matrix. It also checks open PRs for a missed first publication. The sweep can
 publish a missing alias or repair an expired target when a READY deployment

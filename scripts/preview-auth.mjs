@@ -100,7 +100,7 @@ function previewUri(uri, domain) {
   try { url = new URL(uri); } catch { return null; }
   for (const [app, [repo]] of Object.entries(APP_OWNERS)) {
     const pr = ownedPr(url.hostname, app, domain);
-    if (pr && validCallbackPath(url.pathname) && uri === `https://${url.hostname}${url.pathname}`) {
+    if (pr && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash) {
       return { app, repo, pr, path: url.pathname };
     }
   }
@@ -405,8 +405,6 @@ export async function previewAuth({
       for (const uri of uris ?? []) {
         const entry = previewUri(uri, domain);
         if (!entry || entry.repo !== repo || (onlyPr && entry.pr !== onlyPr)) continue;
-        const current = byApp.get(entry.app);
-        if (!decommission && (current ? !current.callback_paths.includes(entry.path) : !canDetectRetiredApps)) continue;
         await attempt(entry.app, `remove PR #${entry.pr} callback`, async () => {
           if (await shouldClean(entry, entry.pr)) await updateCallback(client, uri, 'remove');
         });

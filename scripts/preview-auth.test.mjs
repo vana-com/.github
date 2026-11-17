@@ -349,12 +349,12 @@ test('closed cleanup removes all aliases before Account calls and isolates a fai
   assert.equal(result.state, 'failed');
   assert.match(result.failures[0].reason, /Account request failed \(503\)/);
   assert.equal(JSON.stringify(result).includes('secret response body'), false);
-  assert.deepEqual(f.writes().map(c => c.method), ['DELETE', 'DELETE', 'POST', 'POST', 'POST', 'POST']);
+  assert.deepEqual(f.writes().map(c => c.method), ['DELETE', 'DELETE', 'POST', 'POST', 'POST', 'POST', 'POST']);
   assert.equal(f.state.aliases.size, 0);
-  assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri, unknownPath]);
+  assert.deepEqual(f.state.clientUris.get('web-dev'), [webUri]);
   assert.deepEqual(f.delays, [500, 1000]);
   const accountCalls = f.calls.filter(c => c.origin === 'https://account-dev.vana.org');
-  assert.deepEqual(accountCalls.map(c => c.method), ['GET', 'GET', 'POST', 'GET', 'POST', 'GET', 'POST', 'GET', 'POST']);
+  assert.deepEqual(accountCalls.map(c => c.method), ['GET', 'GET', 'POST', 'GET', 'POST', 'GET', 'POST', 'GET', 'POST', 'GET', 'POST']);
 });
 
 test('a closed PR alias now pointing to a foreign deployment is preserved', async () => {
@@ -611,7 +611,7 @@ test('scheduled cleanup finds aliases and callback-only entries for former matri
 test('scheduled cleanup removes callback-only closed PRs and keeps unrelated exact entries', async () => {
   const f = fixture({ pr: closedPr, clientUris: { 'web-dev': [webUri, unknownPath, 'https://unrelated.example/auth/callback'] } });
   assert.equal((await f.run(sweep)).state, 'cleanup-checked');
-  assert.deepEqual(f.state.clientUris.get('web-dev'), [unknownPath, 'https://unrelated.example/auth/callback']);
+  assert.deepEqual(f.state.clientUris.get('web-dev'), ['https://unrelated.example/auth/callback']);
 });
 
 test('daily sweep publishes a verified build whose deployment event left no artifacts', async () => {
@@ -792,5 +792,16 @@ test('does not retry 401 and reports exhausted transient failures', async () => 
     let calls = 0;
     await assert.rejects(retryRequest(async () => { calls++; return { ok: false, status }; }, async () => {}, 'https://example.test', {}), new RegExp(`API request failed \\(${status}\\)`));
     assert.equal(calls, expected);
+  }
+});
+
+
+test('close and sweep remove historical callback paths after path rename or callback removal', async () => {
+  for (const app of [{...web, callback_paths: ['/auth/callback']}, {...web, callback_paths: [], client_id_key: undefined}]) {
+    for (const event of [pullEvent('closed'), sweep]) {
+      const f = fixture({apps: [app], pr: closedPr, clientUris: {'web-dev': [webUri, `https://${host('web')}/?legacy=1`, 'https://unrelated.example/callback']}});
+      assert.equal((await f.run(event)).state, 'cleanup-checked');
+      assert.deepEqual(f.state.clientUris.get('web-dev'), ['https://unrelated.example/callback']);
+    }
   }
 });
