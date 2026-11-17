@@ -5,6 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// Names own the global alias namespace; only these repository/project pairs may use them.
+export const APP_OWNERS = Object.freeze({
+  web: ['vana-com/unity-surfaces', 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV'],
+  account: ['vana-com/unity-surfaces', 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M'],
+  mobile: ['vana-com/unity-surfaces', 'prj_f3Hqy5lTO7KPRl9wVDNyhKEp5oGf'],
+  community: ['vana-com/unity-surfaces', 'prj_fvIr1YrwTjWZIHwqfP2561OH9CY0'],
+  metrics: ['vana-com/unity-surfaces', 'prj_OmkurTBlmnaSp1Z0sOzmKWEFwUvK'],
+  open: ['vana-com/unity-surfaces', 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja'],
+  'my-two-cents': ['vana-com/my-two-cents', 'prj_u5iiNxoAsSv2bSJN0K45tjr9DB01'],
+});
+
 export function previewHost(app, pr, domain) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(app) || app.length > 40 ||
       !/^[1-9][0-9]*$/.test(String(pr)) ||
@@ -16,14 +27,15 @@ export function previewHost(app, pr, domain) {
   return host;
 }
 
-export function validateMatrix(matrix, domain) {
+export function validateMatrix(matrix, domain, repo) {
   if (!Array.isArray(matrix) || !matrix.length) throw new Error('Invalid app matrix');
   const apps = new Set(), projects = new Set();
   for (const app of matrix) {
     previewHost(app.app, 1, domain);
-    if (!/^prj_[A-Za-z0-9]+$/.test(app.project_id) || projects.has(app.project_id) || apps.has(app.app) ||
-        typeof app.needs_neon !== 'boolean' || !/^[A-Z][A-Z0-9_]*$/.test(app.client_id_key) ||
-        !Array.isArray(app.callback_paths) || !app.callback_paths.length ||
+    const owner = APP_OWNERS[app.app];
+    if (!owner || owner[0] !== repo || owner[1] !== app.project_id || projects.has(app.project_id) || apps.has(app.app) ||
+        typeof app.needs_neon !== 'boolean' || !Array.isArray(app.callback_paths) ||
+        (app.callback_paths.length > 0 ? !/^[A-Z][A-Z0-9_]*$/.test(app.client_id_key ?? '') : app.client_id_key != null) ||
         app.callback_paths.some(path => typeof path !== 'string' || !/^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/.test(path))) {
       throw new Error('Invalid app matrix entry');
     }
@@ -46,7 +58,7 @@ export function provisioningState(app) {
 }
 
 export async function previewAuth({ eventName, event, repo, matrix, domain, targetBranch, api, alias }) {
-  validateMatrix(matrix, domain);
+  validateMatrix(matrix, domain, repo);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error('Invalid repository');
   if (!targetBranch || !/^[A-Za-z0-9._/-]+$/.test(targetBranch)) throw new Error('Invalid target branch');
   const pull = number => api('github', `/repos/${repo}/pulls/${number}`);
@@ -78,7 +90,7 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
   if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
     for (const app of matrix) {
       const aliases = await api('vercel', '/aliases', null, app);
-      const client = await api('account', '', null, app);
+      const client = app.callback_paths.length ? await api('account', '', null, app) : {};
       const prs = new Set(aliases.map(a => ownedPr(a.alias, app.app, domain)).filter(Boolean));
       for (const uri of client.hydra?.redirect_uris ?? []) {
         let url;
@@ -121,14 +133,18 @@ export async function previewAuth({ eventName, event, repo, matrix, domain, targ
 
 async function main() {
   const env = process.env;
-  for (const name of ['GITHUB_REPOSITORY', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'TEAM_ID', 'ACCOUNT_ORIGIN', 'ACCOUNT_ADMIN_TOKEN', 'APP_MATRIX', 'PREVIEW_DOMAIN', 'ACCOUNT_WIRING_MODE', 'TARGET_BRANCH']) {
+  for (const name of ['GITHUB_REPOSITORY', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'TEAM_ID', 'APP_MATRIX', 'PREVIEW_DOMAIN', 'ACCOUNT_WIRING_MODE', 'TARGET_BRANCH']) {
     if (!env[name]) throw new Error(`Missing ${name}`);
   }
   if (env.ACCOUNT_WIRING_MODE !== 'existing-clients') throw new Error('Unsupported Account wiring mode');
-  const matrix = validateMatrix(JSON.parse(env.APP_MATRIX), env.PREVIEW_DOMAIN);
-  for (const app of matrix) if (!env[app.client_id_key]) throw new Error(`Missing client ID for ${app.app}`);
-  const account = new URL(env.ACCOUNT_ORIGIN);
-  if (account.protocol !== 'https:' || account.origin !== env.ACCOUNT_ORIGIN) throw new Error('Invalid ACCOUNT_ORIGIN');
+  const matrix = validateMatrix(JSON.parse(env.APP_MATRIX), env.PREVIEW_DOMAIN, env.GITHUB_REPOSITORY);
+  for (const app of matrix) if (app.callback_paths.length && !env[app.client_id_key]) throw new Error(`Missing client ID for ${app.app}`);
+  let account;
+  if (matrix.some(app => app.callback_paths.length)) {
+    if (!env.ACCOUNT_ORIGIN || !env.ACCOUNT_ADMIN_TOKEN) throw new Error('Missing Account configuration');
+    account = new URL(env.ACCOUNT_ORIGIN);
+    if (account.protocol !== 'https:' || account.origin !== env.ACCOUNT_ORIGIN) throw new Error('Invalid ACCOUNT_ORIGIN');
+  }
   async function request(base, path, token, body) {
     const response = await fetch(base + path, {
       method: body ? 'POST' : 'GET',

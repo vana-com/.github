@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { previewAuth, validateMatrix } from './preview-auth.mjs';
 
 const matrix = [
-  { app: 'web', project_id: 'prj_web', client_id_key: 'WEB_ID', callback_paths: ['/auth/callback'], needs_neon: false },
-  { app: 'account', project_id: 'prj_account', client_id_key: 'ACCOUNT_ID', callback_paths: ['/api/callback'], needs_neon: false },
+  { app: 'web', project_id: 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV', client_id_key: 'WEB_ID', callback_paths: ['/auth/callback'], needs_neon: false },
+  { app: 'account', project_id: 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M', client_id_key: 'ACCOUNT_ID', callback_paths: ['/api/callback'], needs_neon: false },
 ];
-const repo = 'org/repo', domain = 'vana.boo', sha = 'a'.repeat(40);
+const repo = 'vana-com/unity-surfaces', domain = 'vana.boo', sha = 'a'.repeat(40);
 const pr = { number: 12, state: 'open', base: { ref: 'dev' }, head: { sha, repo: { full_name: repo } } };
 const event = { deployment_status: { state: 'success', environment_url: 'https://deploy.vercel.app' }, deployment: { sha } };
 function fixture(overrides = {}) {
   const calls = [];
-  const deployment = { id: 'dpl_1', projectId: 'prj_web', readyState: 'READY', meta: { githubCommitOrg: 'org', githubCommitRepo: 'repo', githubCommitSha: sha }, ...overrides.deployment };
+  const deployment = { id: 'dpl_1', projectId: 'prj_9MpHdKQiODnS6V9m4MOtwAIKaabV', readyState: 'READY', meta: { githubCommitOrg: 'vana-com', githubCommitRepo: 'unity-surfaces', githubCommitSha: sha }, ...overrides.deployment };
   let reads = 0;
   const api = async (service, path, body, app) => {
     calls.push([service, path, body, app?.app]);
@@ -25,9 +25,9 @@ function fixture(overrides = {}) {
   return { calls, run };
 }
 test('validates app, domain, and callback paths', () => {
-  for (const bad of ['../web', 'WEB', 'web.example']) assert.throws(() => validateMatrix([{ ...matrix[0], app: bad }], domain));
-  for (const bad of ['vana.boo.evil/', '*.vana.boo', 'vana.boo:443']) assert.throws(() => validateMatrix(matrix, bad));
-  assert.throws(() => validateMatrix([{ ...matrix[0], callback_paths: ['//evil.example'] }], domain));
+  for (const bad of ['../web', 'WEB', 'web.example']) assert.throws(() => validateMatrix([{ ...matrix[0], app: bad }], domain, repo));
+  for (const bad of ['vana.boo.evil/', '*.vana.boo', 'vana.boo:443']) assert.throws(() => validateMatrix(matrix, bad, repo));
+  assert.throws(() => validateMatrix([{ ...matrix[0], callback_paths: ['//evil.example'] }], domain, repo));
 });
 test('rejects malicious event URLs and foreign projects or repositories', async () => {
   for (const url of ['https://deploy.vercel.app.evil.test', 'https://user@deploy.vercel.app', 'https://deploy.vercel.app/path']) {
@@ -56,7 +56,7 @@ test('closed PR removes only exact owned aliases and callbacks; reopen prevents 
   assert.equal(reopened.calls.some(c => c[0] === 'account' || c[0] === 'alias'), false);
 });
 test('routes the matching project to its app client and blocks unprovisioned Neon', async () => {
-  const f = fixture({ deployment: { projectId: 'prj_account' } });
+  const f = fixture({ deployment: { projectId: 'prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M' } });
   assert.equal((await f.run()).state, 'published');
   assert.equal(f.calls.find(c => c[0] === 'account')[3], 'account');
   const blocked = fixture();
@@ -67,4 +67,25 @@ test('sweep ignores unrelated URI paths and open PRs', async () => {
   const f = fixture({ pull: () => ({ ...pr, state: 'closed' }), uris: ['https://web-pr-12.vana.boo/auth/callback', 'https://web-pr-13.vana.boo/other'] });
   await f.run({ eventName: 'schedule', event: {} });
   assert.equal(f.calls.some(c => c[1]?.endsWith('/pulls/13')), false);
+});
+
+test('rejects ownership collisions before making API calls', async () => {
+  for (const opts of [
+    { repo: 'vana-com/my-two-cents' },
+    { matrix: [{ ...matrix[0], project_id: 'prj_u5iiNxoAsSv2bSJN0K45tjr9DB01' }] },
+    { matrix: [{ ...matrix[0], project_id: 'prj_yEUfHW7APiEIxcYfMHTAGPpMl6mI' }] },
+  ]) {
+    const f = fixture();
+    await assert.rejects(f.run(opts));
+    assert.deepEqual(f.calls, []);
+  }
+});
+test('static app publishes and sweeps without Account API access', async () => {
+  const staticApp = { app: 'open', project_id: 'prj_QiRN1gRk8KBY5Do11tVQgTXisdja', callback_paths: [], needs_neon: false };
+  const f = fixture({ deployment: { projectId: staticApp.project_id } });
+  assert.equal((await f.run({ matrix: [staticApp] })).state, 'published');
+  assert.equal(f.calls.some(c => c[0] === 'account'), false);
+  const sweep = fixture();
+  await sweep.run({ eventName: 'schedule', event: {}, matrix: [staticApp] });
+  assert.equal(sweep.calls.some(c => c[0] === 'account'), false);
 });
