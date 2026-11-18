@@ -300,7 +300,7 @@ on:
         default: false
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   deployments: read
 jobs:
   preview:

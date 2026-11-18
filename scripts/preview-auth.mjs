@@ -311,6 +311,7 @@ export async function previewAuth({
       return;
     }
     await alias('rm', host, latest);
+    return true;
   }
 
   async function updateCallback(app, uri, action) {
@@ -489,6 +490,7 @@ export async function previewAuth({
     if (onlyPr && !PR_NUMBER.test(onlyPr)) throw new PreviewError('Invalid pull request number');
     const repair = [];
     const commentPrs = new Map();
+    const removedPrs = new Set();
     const aliasHostsByApp = new Map();
     // Clean every owned Vercel project before trying Account, even when the matrix has drifted.
     for (const app of ownedApps) {
@@ -499,7 +501,7 @@ export async function previewAuth({
         const pr = ownedPr(item.alias, app.app, domain);
         if (!pr) continue;
         await attempt(app.app, `reconcile PR #${pr} alias`, async () => {
-          if (await shouldClean(app, pr)) await removeAlias(app, pr, () => shouldClean(app, pr));
+          if (await shouldClean(app, pr) && await removeAlias(app, pr, () => shouldClean(app, pr))) removedPrs.add(pr);
           else if (sweep && byApp.has(app.app)) repair.push({ app: byApp.get(app.app), pr, host: item.alias });
         });
       }
@@ -574,6 +576,12 @@ export async function previewAuth({
           await writeComment(onlyPr, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
         }
       } catch (error) { warnings.push(`comment on PR #${onlyPr}: ${failureReason(error)}`); }
+    }
+    // A sweep or decommission removed these previews without a close event: close their comments too.
+    // Update only, and only when the run had no failure to report.
+    if (sweep && !onlyPr && !failures.length) {
+      const note = decommission ? 'Previews and sign-in callbacks removed: previews are turned off for this repository.' : undefined;
+      for (const pr of removedPrs) await writeComment(pr, async () => renderPreviewComment({ closed: true, closedNote: note }), false);
     }
     for (const pr of commentPrs.values()) await openComment(pr);
     return finish(decommission ? 'decommissioned' : pushNeeded.size ? 'push-needed' : 'cleanup-checked');
