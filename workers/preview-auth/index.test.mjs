@@ -315,3 +315,13 @@ test('Worker runJob uses scheduled-sweep text for incomplete close cleanup', asy
   assert.match(f.comments[0].body,/next scheduled preview sweep will retry/);
   assert.doesNotMatch(f.comments[0].body,/Actions tab/);
 });
+
+test('API calls refuse redirects with an option the Workers runtime accepts', async () => {
+  const seen = [];
+  const { api } = createApi({ GITHUB_TOKEN: 'test', GITHUB_REPOSITORY: repo }, { fetchFn: async (url, opts) => { seen.push(opts.redirect); return new Response(null, { status: 302, headers: { location: 'https://example.invalid/' } }); } });
+  await assert.rejects(api('github', '/repos/' + repo), /GitHub request failed \(302\)/);
+  const app = createGitHubApp({ fetchFn: async (url, opts) => { seen.push(opts.redirect); return new Response(null, { status: 302 }); } });
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await assert.rejects(app({ GITHUB_APP_ID: '1', GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }) }, repo), /GitHub App request failed \(302\)/);
+  assert.ok(seen.length >= 2 && seen.every(r => r === 'manual'), JSON.stringify(seen));
+});

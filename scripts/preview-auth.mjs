@@ -700,7 +700,7 @@ export function createApi(env, {
     const [name, origin, tokenKey] = services[service];
     if (!env[tokenKey]) throw new PreviewError(`Missing ${name} credentials`);
     const response = await retryRequest(fetchFn, sleep, origin + path, {
-      method, redirect: 'error',
+      method, redirect: 'manual',
       headers: { 'User-Agent': 'vana-preview-auth', Authorization: `Bearer ${env[tokenKey]}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     }, { allowMissing, service: name, preflight, attempts });

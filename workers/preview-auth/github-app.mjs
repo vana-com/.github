@@ -20,7 +20,7 @@ export function createGitHubApp({ fetchFn = fetch, cryptoImpl = crypto, now = Da
   }
   async function request(path, auth, body) {
     const response = await fetchFn('https://api.github.com' + path, {
-      method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
+      method: body ? 'POST' : 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000),
       headers: { Authorization: `Bearer ${auth}`, Accept: 'application/vnd.github+json', 'User-Agent': 'vana-preview-auth', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
