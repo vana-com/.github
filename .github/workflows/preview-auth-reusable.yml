@@ -28,7 +28,7 @@ permissions:
   pull-requests: read
   deployments: read
 env:
-  TRUSTED_PREVIEW_AUTH_REF: 18c56c54fe63992cd073333f74dbf0be7f38b0d5
+  TRUSTED_PREVIEW_AUTH_REF: 538245d4f219263c820b0e0f6467c66c3d78fbef
 jobs:
   admission:
     if: >-
@@ -71,6 +71,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: preview-auth
+    permissions:
+      contents: read
+      pull-requests: write # one sticky preview comment per PR
+      deployments: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
