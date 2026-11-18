@@ -1056,3 +1056,48 @@ test('the sign-in note names the configured preview domain', () => {
   assert.match(body, /`previews.example.test` links/);
   assert.equal(body.includes('vana.boo'), false);
 });
+
+test('a sweep that removes a closed PR preview closes its existing comment and creates none', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ pr: closedPr, aliases: [mapping(web)], initialComments: [stale] });
+  assert.equal((await f.run({ ...sweep, comments: f.comments, runUrl })).state, 'cleanup-checked');
+  assert.equal(f.state.aliases.size, 0);
+  assert.match(f.state.comments[0].body, /Previews and sign-in callbacks removed/);
+  const none = fixture({ pr: closedPr, aliases: [mapping(web)] });
+  await none.run({ ...sweep, comments: none.comments, runUrl });
+  assert.deepEqual(none.state.comments, []);
+});
+
+test('decommission closes existing comments with a repository-level note', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ aliases: [mapping(web)], initialComments: [stale] });
+  await f.run({ ...dispatch, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, /turned off for this repository/);
+});
+
+test('a sweep keeps the comment when only a retired app alias is removed from an open PR', async () => {
+  const live = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ apps: [open], aliases: [mapping(web)], initialComments: [live] });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(f.state.aliases.size, 0);
+  assert.equal(f.state.comments[0].body, `${COMMENT_MARKER}\nready`);
+});
+
+test('a sweep that removes only a callback for a closed PR closes its comment', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ pr: closedPr, clientUris: { 'web-dev': [webUri] }, initialComments: [stale] });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, /Previews and sign-in callbacks removed/);
+});
+
+test('a sweep still closes a removed preview comment when another cleanup fails, and says so', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({
+    pr: closedPr, aliases: [mapping(web)], initialComments: [stale],
+    intercept: ({ origin }) => origin === 'https://account-dev.vana.org' ? json({ message: 'down' }, 500) : undefined,
+  });
+  const result = await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(f.state.aliases.size, 0);
+  assert.ok(result.failures.length);
+  assert.match(f.state.comments[0].body, /removal is incomplete/);
+});
