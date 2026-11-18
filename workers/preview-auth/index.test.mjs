@@ -186,29 +186,38 @@ test('App identity does not match a stranger or the old Actions bot', async () =
   assert.equal((await adapter.find(12)).id, 3);
 });
 
-test('poison job is retired after eight failures and the next job can run', async () => {
+test('a job in backoff does not hold up the next job, and is retired after eight failures', async () => {
   const f = fixture(); await send(f, '/github', github(), { id: 'poison' });
   await send(f, '/github', github('reopened'), { id: 'healthy' });
   const storage = f.stores.get(repo);
-  let attempts = 0;
+  let broken = true;
   const object = new PreviewRepo({ storage }, f.env, { fetchFn: f.fetchFn, access: async (...args) => {
-    if (++attempts <= 8) throw new Error('private credential value');
+    if (broken) throw new Error('private credential value');
     return access(...args);
   } });
-  for (let i = 1; i <= 7; i++) {
+  await object.alarm();
+  const [poison] = await storage.get('queue');
+  assert.equal(poison.id, 'github:poison'); assert.equal(poison.attempts, 1); assert.ok(poison.notBefore > Date.now());
+  assert.ok(storage.alarm <= Date.now() + 1, 'the healthy job is due now');
+  broken = false; await object.alarm();
+  assert.deepEqual(await storage.get('done'), ['github:healthy']);
+  assert.equal(f.comments.length, 1);
+  assert.equal(storage.alarm, (await storage.get('queue'))[0].notBefore, 'next wake is the retry time');
+  await send(f, '/github', github('synchronize'), { id: 'later' });
+  assert.ok(storage.alarm <= Date.now() + 1, 'a new job wakes the queue before the retry time');
+  await object.alarm();
+  assert.deepEqual(await storage.get('done'), ['github:healthy', 'github:later']);
+  broken = true;
+  for (let i = 2; i <= 7; i++) {
     await object.alarm();
     assert.equal((await storage.get('queue'))[0].attempts, i);
-    assert.equal((await storage.get('queue')).length, 2);
     assert.ok(storage.alarm > Date.now());
   }
   await object.alarm();
-  assert.deepEqual(await storage.get('done'), ['github:poison']);
-  assert.equal((await storage.get('queue'))[0].id, 'github:healthy');
+  assert.equal((await storage.get('queue')).length, 0);
+  assert.deepEqual(await storage.get('done'), ['github:healthy', 'github:later', 'github:poison']);
   assert.deepEqual((({attempts,error}) => ({attempts,error}))(await storage.get('last')), {attempts:8,error:'job_execution_failed'});
   assert.doesNotMatch(JSON.stringify([...storage.data]), /private credential/);
-  await object.alarm();
-  assert.equal((await storage.get('queue')).length, 0);
-  assert.equal(f.comments.length, 1);
   await worker.scheduled({ scheduledTime: 999 }, f.env);
   assert.equal((await storage.get('queue'))[0].kind, 'schedule');
 });

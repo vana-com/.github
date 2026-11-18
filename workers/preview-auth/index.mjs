@@ -149,7 +149,9 @@ export class PreviewRepo {
       if (queue.length >= 200) return false;
       await tx.put('repo', job.repo);
       await tx.put('queue', [...queue, { ...job, attempts: 0 }]);
-      if (await tx.getAlarm() === null) await tx.setAlarm(Date.now() + 1);
+      // Run the new job now even if an older job's backoff alarm is set later.
+      const alarm = await tx.getAlarm();
+      if (alarm === null || alarm > Date.now() + 1) await tx.setAlarm(Date.now() + 1);
       return true;
     });
     return json({ state: accepted ? 'queued' : 'full' }, accepted ? 202 : 503);
@@ -169,7 +171,9 @@ export class PreviewRepo {
     return this.alarmFlight;
   }
   async drainOne() {
-    const [job] = await this.storage.get('queue') ?? [];
+    // A job in backoff must not hold up newer jobs for the same repo: run the job whose retry time is earliest.
+    const queue = await this.storage.get('queue') ?? [];
+    const job = queue.reduce((first, item) => (item.notBefore ?? 0) < (first.notBefore ?? 0) ? item : first, queue[0]);
     if (!job) return;
     let results = [], error = null;
     try {
@@ -178,21 +182,19 @@ export class PreviewRepo {
     } catch (e) { error = 'job_execution_failed'; console.log('preview job error', job.kind, job.repo, String(e?.name), String(e?.message ?? '').split('\n')[0].replace(/(gh[a-z]_|Bearer\s+)\S+/g, '$1***').slice(0, 200)); }
     console.log('preview job', JSON.stringify({ kind: job.kind, repo: job.repo, error, states: results.map(r => r.state), failures: results.flatMap(r => (r.failures ?? []).map(f => [f.app, f.operation, f.reason])) })); // Never persist arbitrary exception text/credentials.
     await this.storage.transaction(async tx => {
-      const queue = await tx.get('queue') ?? [];
-      if (queue[0]?.id !== job.id) throw new Error('Queue head changed');
+      const queue = await tx.get('queue') ?? [], index = queue.findIndex(item => item.id === job.id);
+      if (index < 0) throw new Error('Queued job changed');
       const attempts = (job.attempts ?? 0) + 1;
       if (error && attempts < 8) {
-        queue[0].attempts = attempts;
-        await tx.put('queue', queue);
-        await tx.setAlarm(Date.now() + Math.min(30 * 60_000, 30_000 * 2 ** Math.min(queue[0].attempts, 6)));
-        return;
+        queue[index] = { ...queue[index], attempts, notBefore: Date.now() + Math.min(30 * 60_000, 30_000 * 2 ** Math.min(attempts, 6)) };
+      } else {
+        queue.splice(index, 1);
+        await tx.put('done', [...(await tx.get('done') ?? []), job.deliveryId ?? job.id].slice(-500));
+        // Bounded, non-secret operational status; API bodies/credentials are never logged.
+        await tx.put('last', { id: job.id, at: Date.now(), attempts, ...(error ? { error } : {}), states: results.map(r => r.state), failures: results.reduce((n, r) => n + (r.failures?.length ?? 0), 0) });
       }
-      queue.shift();
       await tx.put('queue', queue);
-      await tx.put('done', [...(await tx.get('done') ?? []), job.deliveryId ?? job.id].slice(-500));
-      // Bounded, non-secret operational status; API bodies/credentials are never logged.
-      await tx.put('last', { id: job.id, at: Date.now(), attempts, ...(error ? { error } : {}), states: results.map(r => r.state), failures: results.reduce((n, r) => n + (r.failures?.length ?? 0), 0) });
-      if (queue.length) await tx.setAlarm(Date.now() + 1);
+      if (queue.length) await tx.setAlarm(Math.max(Date.now() + 1, Math.min(...queue.map(item => item.notBefore ?? 0))));
       else await tx.deleteAlarm();
     });
   }
