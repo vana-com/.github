@@ -840,12 +840,12 @@ test('renders one table row per app with a link only when the preview is live', 
     ],
   });
   assert.ok(body.startsWith(`${COMMENT_MARKER}\n`));
-  assert.match(body, /Commit `aaaaaaa` · \[Preview auth run\]\(https:\/\/github.com\/vana-com\/unity-surfaces\/actions\/runs\/77\)/);
+  assert.match(body, /Commit `aaaaaaa` · \[Workflow run\]\(https:\/\/github.com\/vana-com\/unity-surfaces\/actions\/runs\/77\)/);
   assert.match(body, /\| web \| \[web-pr-12.vana.boo\]\(https:\/\/web-pr-12.vana.boo\) \| ✅ Ready \|/);
   assert.match(body, /\| account \| `account-pr-12.vana.boo` \| ⏳ Building \|/);
-  assert.match(body, /\| open \| `open-pr-12.vana.boo` \| ❌ Build failed — \[run log\]\(https:\/\/github.com\/vana-com\/unity-surfaces\/actions\/runs\/77\) \|/);
+  assert.match(body, /\| open \| `open-pr-12.vana.boo` \| ❌ Build failed — \[View logs\]\(https:\/\/github.com\/vana-com\/unity-surfaces\/actions\/runs\/77\) \|/);
   assert.match(body, /\| metrics \| \[metrics-pr-12.vana.boo\].*\(Vercel sign-in required\) \| ✅ Ready \|/);
-  assert.match(body, /Sign in with your normal Vana account/);
+  assert.match(body, /Sign in with your Vana account \(dev\)/);
 });
 
 test('render drops a run URL that is not a GitHub Actions run and labels unknown states', () => {
@@ -857,7 +857,7 @@ test('render drops a run URL that is not a GitHub Actions run and labels unknown
 test('closed render keeps the marker and says previews were removed', () => {
   const body = renderPreviewComment({ closed: true });
   assert.ok(body.startsWith(COMMENT_MARKER));
-  assert.match(body, /Previews and sign-in callbacks were removed/);
+  assert.match(body, /Previews and sign-in callbacks removed/);
   assert.equal(body.includes('| App |'), false);
 });
 
@@ -907,7 +907,7 @@ test('a PR event posts one comment with each app state, then edits it instead of
 test('a failed build shows as failed with the run link', async () => {
   const f = fixture({ apps: [web, open], deployments: [deployment(web), deployment(open, { readyState: 'ERROR' })] });
   await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
-  assert.match(f.state.comments[0].body, /\| open \| `open-pr-12.vana.boo` \| ❌ Build failed — \[run log\]/);
+  assert.match(f.state.comments[0].body, /\| open \| `open-pr-12.vana.boo` \| ❌ Build failed — \[View logs\]/);
 });
 
 test('a stale alias on an older commit reads as updating while the new commit builds', async () => {
@@ -928,7 +928,7 @@ test('closing a PR edits the existing comment and creates none when no preview c
   const result = await open_.run({ ...pullEvent('closed', closedPr), comments: open_.comments, runUrl });
   assert.equal(result.state, 'cleanup-checked');
   assert.equal(open_.state.comments.length, 1);
-  assert.match(open_.state.comments[0].body, /Previews and sign-in callbacks were removed/);
+  assert.match(open_.state.comments[0].body, /Previews and sign-in callbacks removed/);
   const never = fixture({ apps: [web], pr: closedPr });
   await never.run({ ...pullEvent('closed', closedPr), comments: never.comments, runUrl });
   assert.deepEqual(never.state.comments, []);
@@ -965,7 +965,7 @@ test('a direct deployment status refreshes the comment after success and after a
     comments: failed.comments, runUrl,
   });
   assert.equal(result.state, 'failed');
-  assert.match(failed.state.comments[0].body, /❌ Build failed — \[run log\]/);
+  assert.match(failed.state.comments[0].body, /❌ Build failed — \[View logs\]/);
 });
 
 test('a PR closed while publishing gets no open-state comment, and an existing one is switched to closed', async () => {
@@ -980,7 +980,7 @@ test('a PR closed while publishing gets no open-state comment, and an existing o
     initialComments: [{ id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nold open body` }],
   });
   await existing.run({ ...pullEvent('reopened'), comments: existing.comments, runUrl });
-  assert.match(existing.state.comments[0].body, /Previews and sign-in callbacks were removed/);
+  assert.match(existing.state.comments[0].body, /Previews and sign-in callbacks removed/);
 });
 
 test('a push during the run leaves the comment for the newer commit run to write', async () => {
@@ -1053,6 +1053,6 @@ test('a publication failure shows the app as failed, not as a permanent spinner'
 
 test('the sign-in note names the configured preview domain', () => {
   const body = renderPreviewComment({ pr: 12, sha, runUrl, domain: 'previews.example.test', rows: [] });
-  assert.match(body, /`previews.example.test` URL/);
+  assert.match(body, /`previews.example.test` links/);
   assert.equal(body.includes('vana.boo'), false);
 });
