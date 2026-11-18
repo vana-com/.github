@@ -68,12 +68,12 @@ const COMMENT_AUTHOR = 'github-actions[bot]';
 const RUN_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[0-9]+$/;
 const STATE_LABEL = {
   ready: '✅ Ready',
-  updating: '🔄 Updating (showing the previous commit)',
+  updating: '🔄 Updating · previous commit',
   building: '⏳ Building',
-  publishing: '⏳ Publishing the alias',
+  publishing: '⏳ Setting up preview URL',
   failed: '❌ Build failed',
   canceled: '⚠️ Build canceled',
-  unavailable: '⚠️ Not available (needs a preview database)',
+  unavailable: '⚠️ Preview database required',
   unknown: '⚠️ Status unavailable',
 };
 const APP_NOTE = { metrics: 'Vercel sign-in required' };
@@ -83,20 +83,19 @@ export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = fals
   const run = RUN_URL.test(runUrl ?? '') ? runUrl : null;
   if (closed) {
     return [COMMENT_MARKER, '### Preview deployments', '',
-      closedNote ?? 'This PR is closed or no longer targets the preview branch. Previews and sign-in callbacks were removed.'].join('\n');
+      closedNote ?? 'Previews and sign-in callbacks removed: this PR is closed or no longer targets the preview branch.'].join('\n');
   }
   const lines = [COMMENT_MARKER, '### Preview deployments', '',
-    `Commit \`${String(sha).slice(0, 7)}\`${run ? ` · [Preview auth run](${run})` : ''}`, '',
+    `Commit \`${String(sha).slice(0, 7)}\`${run ? ` · [Workflow run](${run})` : ''}`, '',
     '| App | Preview | Status |', '|---|---|---|'];
   for (const { app, host, state } of rows) {
     const label = STATE_LABEL[state] ?? STATE_LABEL.unknown;
-    const detail = state === 'failed' && run ? `${label} — [run log](${run})` : label;
+    const detail = state === 'failed' && run ? `${label} — [View logs](${run})` : label;
     const note = APP_NOTE[app] ? ` (${APP_NOTE[app]})` : '';
     const link = ['ready', 'updating'].includes(state) ? `[${host}](https://${host})` : `\`${host}\``;
     lines.push(`| ${app} | ${link}${note} | ${detail} |`);
   }
-  lines.push('', `Sign in with your normal Vana account (Account dev); it returns to the \`${domain}\` link. Open the \`${domain}\` URL, not the raw Vercel URL. Previews share dev data.`,
-    `Pushing a commit rebuilds and updates this comment. PR #${pr}`);
+  lines.push('', `Open the \`${domain}\` links above, not the raw Vercel URLs. Sign in with your Vana account (dev); you'll return to the preview URL. Previews share dev data.`);
   return lines.join('\n');
 }
 
