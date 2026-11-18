@@ -37,7 +37,7 @@ export function createGitHubApp({ fetchFn = fetch, cryptoImpl = crypto, now = Da
     const installation = await request(`/repos/${repo}/installation`, auth);
     if (!Number.isSafeInteger(installation.id) || installation.id <= 0) throw new Error('Invalid installation');
     const token = await request(`/app/installations/${installation.id}/access_tokens`, auth, {
-      repositories: [repo.split('/')[1]], permissions: { contents: 'read', pull_requests: 'write', issues: 'write' },
+      repositories: [repo.split('/')[1]], permissions: { contents: 'read', pull_requests: 'write' },
     });
     const expires = Date.parse(token.expires_at);
     if (typeof token.token !== 'string' || !token.token || !Number.isFinite(expires) || expires <= now() + 120000) throw new Error('Invalid installation access response');

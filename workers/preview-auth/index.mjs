@@ -175,7 +175,8 @@ export class PreviewRepo {
     try {
       results = await runJob(job, this.env, this.dependencies);
       if (results.some(result => result.failures?.length)) error = 'core_failures';
-    } catch { error = 'job_execution_failed'; } // Never persist arbitrary exception text/credentials.
+    } catch (e) { error = 'job_execution_failed'; console.log('preview job error', job.kind, job.repo, String(e?.name), String(e?.message ?? '').split('\n')[0].replace(/(gh[a-z]_|Bearer\s+)\S+/g, '$1***').slice(0, 200)); }
+    console.log('preview job', JSON.stringify({ kind: job.kind, repo: job.repo, error, states: results.map(r => r.state), failures: results.flatMap(r => (r.failures ?? []).map(f => [f.app, f.operation, f.reason])) })); // Never persist arbitrary exception text/credentials.
     await this.storage.transaction(async tx => {
       const queue = await tx.get('queue') ?? [];
       if (queue[0]?.id !== job.id) throw new Error('Queue head changed');
