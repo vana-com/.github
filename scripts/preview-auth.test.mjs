@@ -1018,3 +1018,25 @@ test('a PR closed mid-publish with a failed callback removal does not claim the 
   assert.match(f.state.comments[0].body, /Preview removal is incomplete/);
   assert.equal(f.state.comments[0].body.includes('were removed'), false);
 });
+
+test('an alias that points at a foreign deployment is never advertised as a live link', async () => {
+  const foreign = deployment(web, { id: 'dpl_foreign', projectId: 'prj_other' });
+  const f = fixture({ apps: [web], aliases: [mapping(web, 'dpl_foreign')], deployments: [deployment(web, { readyState: 'BUILDING' }), foreign] });
+  await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
+  const row = f.state.comments[0]?.body.split('\n').find(line => line.startsWith('| web |')) ?? '';
+  assert.equal(row.includes('](https://'), false);
+});
+
+test('a PR lookup failure after a successful cleanup is a warning, not a failed run', async () => {
+  let accountDone = false;
+  const f = fixture({
+    apps: [web], pr: closedPr, aliases: [mapping(web)], deployments: [deployment(web)],
+    intercept: ({ origin, path, method }) => {
+      if (origin === 'https://account-dev.vana.org') accountDone = true;
+      if (accountDone && origin === 'https://api.github.com' && method === 'GET' && /\/pulls\/12$/.test(path)) return json({}, 403);
+    },
+  });
+  const result = await f.run({ ...pullEvent('closed', closedPr), comments: f.comments, runUrl });
+  assert.equal(result.failures, undefined);
+  assert.ok(result.warnings?.length);
+});

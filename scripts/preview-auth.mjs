@@ -427,7 +427,9 @@ export async function previewAuth({
       if (provisioningState(app) !== 'not-required') return row('unavailable');
       const sha = pr.head.sha;
       const needsPrContext = PR_CONTEXT_APPS.has(app.app);
-      const mapping = await readAlias(host);
+      const existing = await readAlias(host);
+      // Advertise a link only when the alias points at one of this app's own deployments.
+      const mapping = existing?.deploymentId && ownedDeployment(await readTarget(existing.deploymentId), app) ? existing : null;
       const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}`, null, app);
       let latest;
       for (const item of candidates ?? []) {
@@ -563,12 +565,13 @@ export async function previewAuth({
         if (prs.length < perPage) break;
       }
     }
-    if (cleanupEvent && !decommission) {
+    if (cleanupEvent && !decommission && comments) {
       // Update an existing comment only: closed PRs that never had a preview get none.
-      const closedPr = await pull(onlyPr);
-      if (!eligiblePr(closedPr)) {
-        await writeComment(onlyPr, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
-      }
+      try {
+        if (!eligiblePr(await pull(onlyPr))) {
+          await writeComment(onlyPr, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
+        }
+      } catch (error) { warnings.push(`comment on PR #${onlyPr}: ${failureReason(error)}`); }
     }
     for (const pr of commentPrs.values()) await openComment(pr);
     return finish(decommission ? 'decommissioned' : pushNeeded.size ? 'push-needed' : 'cleanup-checked');
