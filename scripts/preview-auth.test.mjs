@@ -1089,3 +1089,15 @@ test('a sweep that removes only a callback for a closed PR closes its comment', 
   await f.run({ ...sweep, comments: f.comments, runUrl });
   assert.match(f.state.comments[0].body, /Previews and sign-in callbacks removed/);
 });
+
+test('a sweep still closes a removed preview comment when another cleanup fails, and says so', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({
+    pr: closedPr, aliases: [mapping(web)], initialComments: [stale],
+    intercept: ({ origin }) => origin === 'https://account-dev.vana.org' ? json({ message: 'down' }, 500) : undefined,
+  });
+  const result = await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(f.state.aliases.size, 0);
+  assert.ok(result.failures.length);
+  assert.match(f.state.comments[0].body, /removal is incomplete/);
+});

@@ -578,9 +578,10 @@ export async function previewAuth({
       } catch (error) { warnings.push(`comment on PR #${onlyPr}: ${failureReason(error)}`); }
     }
     // A sweep or decommission removed these previews without a close event: close their comments too.
-    // Update only, and only when the run had no failure to report.
-    if (sweep && !onlyPr && !failures.length) {
-      const note = decommission ? 'Previews and sign-in callbacks removed: previews are turned off for this repository.' : undefined;
+    // Update only. A failure elsewhere in the run must not hide a removal that already happened.
+    if (sweep && !onlyPr) {
+      const note = failures.length ? 'Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.'
+        : decommission ? 'Previews and sign-in callbacks removed: previews are turned off for this repository.' : undefined;
       for (const pr of removedPrs) {
         // A retired app can lose its alias while the PR stays open with live previews.
         if (!decommission) {
