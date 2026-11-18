@@ -443,13 +443,16 @@ export async function previewAuth({
       return row(mapping?.deploymentId === latest.id ? 'ready' : 'publishing');
     } catch { return row('unknown'); }
   }
+  // Never claim removal when this run has failures: the daily sweep retries cleanup.
+  const closeNote = () => failures.length
+    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete; the daily sweep retries it.' : undefined;
   // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
   const openComment = async pr => {
     let latest;
     try { latest = await pull(pr.number); }
     catch (error) { warnings.push(`comment on PR #${pr.number}: ${failureReason(error)}`); return; }
     if (!eligiblePr(latest)) {
-      await writeComment(pr.number, async () => renderPreviewComment({ closed: true }), false);
+      await writeComment(pr.number, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
       return;
     }
     if (latest.head.sha !== pr.head.sha) return;
@@ -564,10 +567,7 @@ export async function previewAuth({
       // Update an existing comment only: closed PRs that never had a preview get none.
       const closedPr = await pull(onlyPr);
       if (!eligiblePr(closedPr)) {
-        await writeComment(onlyPr, async () => renderPreviewComment({
-          closed: true,
-          closedNote: failures.length ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete; the daily sweep retries it.' : undefined,
-        }), false);
+        await writeComment(onlyPr, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
       }
     }
     for (const pr of commentPrs.values()) await openComment(pr);
@@ -586,6 +586,12 @@ export async function previewAuth({
   const success = event.deployment_status.state === 'success';
   if (!success && !PR_CONTEXT_APPS.has(app.app)) {
     fail(app.app, 'build preview', new PreviewError('Deployment failed'));
+    // Best effort: show the failed build on the PR. A lookup problem only adds a warning.
+    try {
+      const matches = await api('github', `/repos/${repo}/commits/${event.deployment.sha}/pulls`);
+      const pr = matches.find(candidate => currentHead(candidate, event.deployment.sha));
+      if (pr) await openComment(pr);
+    } catch (error) { warnings.push(`comment: ${failureReason(error)}`); }
     return finish('failed');
   }
   if (success && deployment.readyState !== 'READY') return finish('ignored');

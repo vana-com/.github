@@ -991,3 +991,30 @@ test('a push during the run leaves the comment for the newer commit run to write
   await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
   assert.deepEqual(f.state.comments, []);
 });
+
+test('a failed build of an app without PR context still shows on the comment', async () => {
+  const f = fixture({ apps: [open], deployments: [deployment(open, { readyState: 'ERROR' })] });
+  f.state.eventDeployment = f.state.deployments.get('dpl_open');
+  const result = await f.run({
+    event: { ...deploymentEvent, deployment_status: { state: 'failure', environment_url: 'https://deploy.vercel.app' } },
+    comments: f.comments, runUrl,
+  });
+  assert.equal(result.state, 'failed');
+  assert.match(f.state.comments[0].body, /\| open \| `open-pr-12.vana.boo` \| ❌ Build failed/);
+});
+
+test('a PR closed mid-publish with a failed callback removal does not claim the previews were removed', async () => {
+  const f = fixture({
+    apps: [web], deployments: [deployment(web)],
+    initialComments: [{ id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nold open body` }],
+    intercept: ({ origin, method, body, state }) => {
+      if (origin !== 'https://account-dev.vana.org' || method !== 'POST') return undefined;
+      if (body.action === 'add') { state.pr = closedPr; return undefined; }
+      return json({ error: 'down' }, 503);
+    },
+  });
+  const result = await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
+  assert.equal(result.state, 'failed');
+  assert.match(f.state.comments[0].body, /Preview removal is incomplete/);
+  assert.equal(f.state.comments[0].body.includes('were removed'), false);
+});
