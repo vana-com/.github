@@ -953,3 +953,41 @@ test('a Preview deployment signal run comments on each resolved PR and carries w
   assert.equal(f.state.comments.length, 1);
   assert.match(f.state.comments[0].body, /✅ Ready/);
 });
+
+test('a direct deployment status refreshes the comment after success and after a failed build', async () => {
+  const ok = fixture({ apps: [web], deployments: [deployment(web)] });
+  assert.equal((await ok.run({ comments: ok.comments, runUrl })).state, 'published');
+  assert.match(ok.state.comments[0].body, /\| web \| \[web-pr-12.vana.boo\].*\| ✅ Ready \|/);
+  const failed = fixture({ apps: [web], deployments: [deployment(web, { readyState: 'ERROR' })] });
+  failed.state.eventDeployment = failed.state.deployments.get('dpl_web');
+  const result = await failed.run({
+    event: { ...deploymentEvent, deployment_status: { state: 'failure', environment_url: 'https://deploy.vercel.app' } },
+    comments: failed.comments, runUrl,
+  });
+  assert.equal(result.state, 'failed');
+  assert.match(failed.state.comments[0].body, /❌ Build failed — \[run log\]/);
+});
+
+test('a PR closed while publishing gets no open-state comment, and an existing one is switched to closed', async () => {
+  const closeDuringPublish = ({ origin, method, state }) => {
+    if (origin === 'https://account-dev.vana.org' && method === 'POST') state.pr = closedPr;
+  };
+  const none = fixture({ apps: [web], deployments: [deployment(web)], intercept: closeDuringPublish });
+  await none.run({ ...pullEvent('reopened'), comments: none.comments, runUrl });
+  assert.deepEqual(none.state.comments, []);
+  const existing = fixture({
+    apps: [web], deployments: [deployment(web)], intercept: closeDuringPublish,
+    initialComments: [{ id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nold open body` }],
+  });
+  await existing.run({ ...pullEvent('reopened'), comments: existing.comments, runUrl });
+  assert.match(existing.state.comments[0].body, /Previews and sign-in callbacks were removed/);
+});
+
+test('a push during the run leaves the comment for the newer commit run to write', async () => {
+  const pushDuringPublish = ({ origin, method, state }) => {
+    if (origin === 'https://account-dev.vana.org' && method === 'POST') state.pr = { ...basePr, head: { ...basePr.head, sha: nextSha } };
+  };
+  const f = fixture({ apps: [web], deployments: [deployment(web)], intercept: pushDuringPublish });
+  await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
+  assert.deepEqual(f.state.comments, []);
+});

@@ -443,9 +443,20 @@ export async function previewAuth({
       return row(mapping?.deploymentId === latest.id ? 'ready' : 'publishing');
     } catch { return row('unknown'); }
   }
-  const openComment = async pr => writeComment(pr.number, async () => renderPreviewComment({
-    pr: pr.number, sha: pr.head.sha, runUrl, rows: await Promise.all([...byApp.values()].map(app => appState(app, pr))),
-  }), true);
+  // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
+  const openComment = async pr => {
+    let latest;
+    try { latest = await pull(pr.number); }
+    catch (error) { warnings.push(`comment on PR #${pr.number}: ${failureReason(error)}`); return; }
+    if (!eligiblePr(latest)) {
+      await writeComment(pr.number, async () => renderPreviewComment({ closed: true }), false);
+      return;
+    }
+    if (latest.head.sha !== pr.head.sha) return;
+    await writeComment(pr.number, async () => renderPreviewComment({
+      pr: pr.number, sha: pr.head.sha, runUrl, rows: await Promise.all([...byApp.values()].map(app => appState(app, pr))),
+    }), true);
+  };
 
   if (eventName === 'pull_request_target' && !cleanupEvent) {
     const pr = event.pull_request;
@@ -579,16 +590,20 @@ export async function previewAuth({
   }
   if (success && deployment.readyState !== 'READY') return finish('ignored');
   const sha = event.deployment.sha;
+  let verifiedPr = null;
   const state = await attempt(app.app, 'publish preview', async () => {
     const matches = await api('github', `/repos/${repo}/commits/${sha}/pulls`);
     const pr = matches.find(candidate => currentHead(candidate, sha));
     if (!pr) return 'ignored';
+    verifiedPr = pr;
     if (!success && beforePr(deployment, pr) !== true) {
       fail(app.app, 'build preview', new PreviewError('Deployment failed'));
       return 'failed';
     }
     return await reconcileBuild(app, pr, { reported: deployment }) ?? 'awaiting-deployment';
   });
+  // Refresh the sticky comment after success, failure or a pending build alike.
+  if (verifiedPr) await openComment(verifiedPr);
   return { ...finish(state), app: app.app };
 }
 
