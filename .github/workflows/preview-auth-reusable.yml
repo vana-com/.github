@@ -1,0 +1,95 @@
+name: Preview authentication
+on:
+  workflow_call:
+    inputs:
+      app_matrix:
+        required: true
+        type: string
+      domain:
+        default: vana.boo
+        type: string
+      target_branch:
+        required: true
+        type: string
+      decommission:
+        default: false
+        type: boolean
+      account_wiring_mode:
+        default: existing-clients
+        type: string
+      doppler_project:
+        required: true
+        type: string
+      doppler_config:
+        required: true
+        type: string
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: read
+env:
+  TRUSTED_PREVIEW_AUTH_REF: 18c56c54fe63992cd073333f74dbf0be7f38b0d5
+jobs:
+  admission:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_run' &&
+      vars.PREVIEW_AUTH_ENABLED == 'true' &&
+      vars.PREVIEW_AUTH_DECOMMISSION != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.signal.outputs.eligible }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vana-com/.github
+          ref: ${{ env.TRUSTED_PREVIEW_AUTH_REF }}
+          path: trusted-preview-auth
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - id: signal
+        run: node trusted-preview-auth/scripts/preview-auth.mjs --admit-signal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+  sync:
+    needs: admission
+    if: >-
+      !cancelled() &&
+      github.ref == 'refs/heads/main' &&
+      vars.PREVIEW_AUTH_ENABLED == 'true' &&
+      (vars.PREVIEW_AUTH_DECOMMISSION != 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.admission.outputs.eligible == 'true')
+    concurrency:
+      group: preview-auth-${{ github.repository }}
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: preview-auth
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vana-com/.github
+          ref: ${{ env.TRUSTED_PREVIEW_AUTH_REF }}
+          path: trusted-preview-auth
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: DopplerHQ/cli-action@014df23b1329b615816a38eb5f473bb9000700b1 # v3
+      - run: doppler run --no-fallback --preserve-env=true --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG" -- node trusted-preview-auth/scripts/preview-auth.mjs
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_PREVIEW_TOKEN }}
+          DOPPLER_PROJECT: ${{ inputs.doppler_project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler_config }}
+          GITHUB_TOKEN: ${{ github.token }}
+          APP_MATRIX: ${{ inputs.app_matrix }}
+          PREVIEW_DOMAIN: ${{ inputs.domain }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          ACCOUNT_WIRING_MODE: ${{ inputs.account_wiring_mode }}
+          PREVIEW_AUTH_DECOMMISSION: ${{ inputs.decommission || vars.PREVIEW_AUTH_DECOMMISSION == 'true' }}

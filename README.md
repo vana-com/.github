@@ -235,3 +235,153 @@ The repository root is [MIT licensed](LICENSE). The isolated
 [`scripts/evm-key-liveness`](scripts/evm-key-liveness) adaptation is
 [Apache-2.0 licensed](scripts/evm-key-liveness/LICENSE); its
 [NOTICE](scripts/evm-key-liveness/NOTICE) preserves the source attribution.
+
+## Preview authentication control plane
+
+Step 0 uses existing dev databases and `https://account-dev.vana.org` for every
+app. Configure the Vercel Preview builds with those peer settings before enabling
+the workflow. The workflow assigns an exact alias and enrolls exact OAuth
+callback URLs for each eligible deployment. Mobile previews run in the browser.
+
+The reusable workflow checks out its own automation at an immutable commit.
+The credentialed caller and app matrix run from the repository's default branch
+(`main`). Pull request and deployment events start a separate signal workflow
+with no secrets, repository checkout or artifacts. A read-only admission job
+uses GitHub to confirm that the signal identifies a same-repository PR before
+the credentialed job can start.
+Each repository has one queue with up to 100 waiting jobs, so callback writes
+from different apps in that repository are serialized. Use distinct Account
+clients for each repository. [GitHub Actions concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)
+
+### Enable previews
+
+1. Deploy the [Account narrow callback API](#account-configuration) to
+   `account-dev`. Verify the dev database, peer app URLs, and Vercel DNS for the
+   preview domain.
+2. Create the `preview-auth` GitHub environment and allow deployments from
+   `main` only. Add the repository's read-only Doppler service token to that
+   environment as `DOPPLER_PREVIEW_TOKEN`.
+3. Merge the signal and credentialed caller to `main`. Pin the caller to a
+   reviewed organization workflow commit. Set the repository variable
+   `PREVIEW_AUTH_ENABLED` to `true` when configuration is ready.
+
+Save the signal as `.github/workflows/preview-deployment-signal.yml`.
+
+```yaml
+name: Preview deployment signal
+on:
+  deployment_status:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, closed]
+permissions: {}
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Signal only. Fork PRs are ineligible for authenticated previews."
+```
+
+The credentialed caller responds to completed signals, or runs from `main` on
+the daily schedule or manual dispatch.
+
+```yaml
+name: Preview auth
+on:
+  workflow_run:
+    workflows: ['Preview deployment signal']
+    types: [completed]
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      decommission:
+        description: Drain this repository's preview aliases and callbacks
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: read
+jobs:
+  preview:
+    if: github.ref == 'refs/heads/main'
+    uses: vana-com/.github/.github/workflows/preview-auth-reusable.yml@<reviewed-40-character-sha>
+    with:
+      target_branch: dev
+      doppler_project: preview-automation
+      doppler_config: dev
+      decommission: ${{ inputs.decommission == true }}
+      app_matrix: >-
+        [{"app":"web","project_id":"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV","client_id_key":"WEB_CLIENT_ID","callback_paths":["/oauth/callback"]}]
+    secrets: inherit
+```
+
+The caller trusts the workflow-run metadata GitHub sends. It looks up the PR
+and its current head through the GitHub API before reading Vercel deployments
+or changing preview state. [GitHub workflow run events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
+
+Each matrix entry names an app, its Vercel project and its exact callback paths.
+The org-owned manifest binds app names to repository and project IDs. Set
+`callback_paths: []` for apps without callbacks. The optional `needs_neon` field
+defaults to false. If it is true and a `migrations_path` is present, the app
+reports `required-unavailable` before publishing. Per-PR Neon provisioning is
+future work. `domain` defaults to `vana.boo`.
+
+### Account configuration
+
+The caller's Doppler config supplies `VERCEL_TOKEN` and `TEAM_ID`. For Account,
+it also supplies `ACCOUNT_ADMIN_TOKEN` and `PREVIEW_DEV_CLIENT_IDS`. The token
+must have access to GET and POST on the narrow `/redirect-uris` endpoint.
+`PREVIEW_DEV_CLIENT_IDS` is a JSON array or comma-separated list of dev OAuth
+client IDs exclusive to the calling repository. Include retired clients until
+their callbacks are drained. Use `[]` for a repository with no Account clients.
+Each callback-enabled app's `client_id_key` points to one of those IDs and must
+match `^[A-Z0-9_]+_CLIENT_ID$`. If the config defines `ACCOUNT_ORIGIN`, its value
+must be `https://account-dev.vana.org`. `account_wiring_mode` accepts
+`existing-clients`.
+
+Every callback write reads the client's existing list and refuses a client
+with a known preview callback owned by another repository. Each write adds or
+removes one exact URI while preserving other entries.
+
+### Cleanup and retirement
+
+A same-repository PR qualifies while it is open on the configured target branch
+and has an ordinary READY Preview deployment for its exact current head,
+repository and project. Opening or reopening a PR can reuse a matching existing
+deployment. A failed build leaves the last good alias intact.
+
+Web, Community and My Two Cents need the Vercel PR ID at build or runtime.
+When the only verified native build predates the PR, the workflow asks Vercel
+to rebuild that deployment. The workflow waits if a matching post-PR build
+already exists. It enrolls callbacks and assigns an alias only after a READY
+deployment identifies the current PR and was created after it opened.
+[Vercel system environment variables](https://vercel.com/docs/environment-variables/system-environment-variables#vercel_git_pull_request_id)
+
+Closing a PR or retargeting it away from the configured branch removes its owned
+aliases before trying Account callbacks. Closed PR callbacks are identified by
+the owned app/PR hostname, including historical paths removed from the matrix.
+The daily sweep also checks all
+repo-owned projects and dev clients, including apps removed from the current
+matrix. It also checks open PRs for a missed first publication. The sweep can
+publish a missing alias or repair an expired target when a READY deployment
+matches the open PR's current head, repository and app project. It reports
+expired aliases that need a new build. Newly opened PRs and unaffected apps
+without a matching build wait for the next deployment.
+
+To retire a caller, set the repository variable `PREVIEW_AUTH_DECOMMISSION` to
+`true` and let existing preview jobs settle. Run the caller manually with
+`decommission: true` and keep the allowlist and ownership entries in place.
+The run drains owned aliases and exact callbacks even for open PRs. Disable
+`PREVIEW_AUTH_ENABLED` and remove the caller only after the run reports
+`decommissioned`.
+
+Alias writes use the Vercel API. Cleanup checks the current target and only
+deletes a verified alias by its UID. It confirms deletion by reading the host
+again. A target whose ownership cannot be verified needs operator review.
+Vercel does not document a conditional alias delete, so avoid manual writes to
+these hostnames during reconciliation. [Vercel Alias API](https://vercel.com/docs/rest-api/aliases/delete-an-alias)
+
+Run `node --test scripts/preview-auth.test.mjs` for the local lifecycle tests.
+The tests exercise the production HTTP adapter through fake GitHub, Account and
+Vercel responses.
