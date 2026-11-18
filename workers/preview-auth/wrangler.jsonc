@@ -1,0 +1,34 @@
+// Paths are relative to this config: index.mjs is workers/preview-auth/index.mjs.
+// nodejs_compat is required for the core CLI-only dynamic node imports at bundle time.
+{
+  "name": "preview-auth",
+  "main": "index.mjs",
+  "compatibility_date": "2026-11-18",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PREVIEW_REPOS",
+        "class_name": "PreviewRepo"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PreviewRepo"
+      ]
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "23 5 * * *"
+    ]
+  },
+  "vars": {
+    "REPOS": "{\"vana-com/unity-surfaces\":{\"targetBranch\":\"dev\",\"domain\":\"vana.boo\",\"matrix\":[{\"app\":\"web\",\"project_id\":\"prj_9MpHdKQiODnS6V9m4MOtwAIKaabV\",\"client_id_key\":\"WEB_OAUTH_CLIENT_ID\",\"callback_paths\":[\"/oauth/callback\"],\"needs_neon\":false},{\"app\":\"account\",\"project_id\":\"prj_Lz3rTFxqAddEOHCkqqdeep4zfj3M\",\"client_id_key\":\"ACCOUNT_HYDRA_CLIENT_ID\",\"callback_paths\":[\"/auth/oidc/callback\"],\"needs_neon\":false},{\"app\":\"community\",\"project_id\":\"prj_fvIr1YrwTjWZIHwqfP2561OH9CY0\",\"client_id_key\":\"COMMUNITY_OAUTH_CLIENT_ID\",\"callback_paths\":[\"/oauth/callback\"],\"needs_neon\":false},{\"app\":\"mobile\",\"project_id\":\"prj_f3Hqy5lTO7KPRl9wVDNyhKEp5oGf\",\"callback_paths\":[],\"needs_neon\":false},{\"app\":\"metrics\",\"project_id\":\"prj_OmkurTBlmnaSp1Z0sOzmKWEFwUvK\",\"callback_paths\":[],\"needs_neon\":false},{\"app\":\"open\",\"project_id\":\"prj_QiRN1gRk8KBY5Do11tVQgTXisdja\",\"callback_paths\":[],\"needs_neon\":false}]},\"vana-com/my-two-cents\":{\"targetBranch\":\"main\",\"domain\":\"vana.boo\",\"matrix\":[{\"app\":\"my-two-cents\",\"project_id\":\"prj_u5iiNxoAsSv2bSJN0K45tjr9DB01\",\"client_id_key\":\"ACCOUNT_CLIENT_ID\",\"callback_paths\":[\"/api/member/auth/callback\"],\"needs_neon\":false}]}}"
+  }
+}

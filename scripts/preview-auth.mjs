@@ -1,6 +1,4 @@
 // Trusted automation only. Caller code is never checked out or executed.
-import { appendFileSync, readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
 
 // Keep retired entries until their aliases and callbacks have been drained.
 export const APP_OWNERS = Object.freeze({
@@ -475,7 +473,7 @@ export async function previewAuth({
   }
   // Never claim removal when this run has failures: the daily sweep retries cleanup.
   const closeNote = () => failures.length
-    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.' : undefined;
+    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. The next scheduled preview sweep will retry.' : undefined;
   // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
   const openComment = async (pr, { createIfMissing = true, applyFailures = true } = {}) => {
     let latest;
@@ -632,7 +630,7 @@ export async function previewAuth({
     // A sweep or decommission removed these previews without a close event: close their comments too.
     // Update only. A failure elsewhere in the run must not hide a removal that already happened.
     if (sweep && !onlyPr) {
-      const note = failures.length ? 'Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.'
+      const note = failures.length ? 'Preview removal is incomplete. The next scheduled preview sweep will retry.'
         : decommission ? 'Previews and sign-in callbacks removed: previews are turned off for this repository.' : undefined;
       for (const pr of removedPrs) {
         // A retired app can lose its alias while the PR stays open with live previews.
@@ -689,7 +687,9 @@ export async function previewAuth({
 
 export function createApi(env, {
   fetchFn = fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  commentAuthor = COMMENT_AUTHOR,
 } = {}) {
+  if (!/^[a-zA-Z0-9_-]+\[bot\]$/.test(commentAuthor)) throw new PreviewError('Invalid comment author');
   const services = {
     github: ['GitHub', 'https://api.github.com', 'GITHUB_TOKEN'],
     vercel: ['Vercel', 'https://api.vercel.com', 'VERCEL_TOKEN'],
@@ -700,7 +700,7 @@ export function createApi(env, {
     if (!env[tokenKey]) throw new PreviewError(`Missing ${name} credentials`);
     const response = await retryRequest(fetchFn, sleep, origin + path, {
       method, redirect: 'error',
-      headers: { Authorization: `Bearer ${env[tokenKey]}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      headers: { 'User-Agent': 'vana-preview-auth', Authorization: `Bearer ${env[tokenKey]}`, 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body ? { body: JSON.stringify(body) } : {}),
     }, { allowMissing, service: name, preflight, attempts });
     if (!response || (allowMissing && response.status === 404) || !decode) return null;
@@ -835,7 +835,7 @@ export function createApi(env, {
       for (let page = 1; ; page++) {
         const list = await request('github', `${issueComments(number)}?per_page=100&page=${page}`);
         if (!Array.isArray(list)) throw new PreviewError('GitHub returned an invalid comment list');
-        const match = list.find(c => c?.user?.login === COMMENT_AUTHOR && c.user.type === 'Bot' &&
+        const match = list.find(c => c?.user?.login === commentAuthor && c.user.type === 'Bot' &&
           typeof c.body === 'string' && c.body.startsWith(COMMENT_MARKER) && Number.isSafeInteger(c.id));
         if (match) return { id: match.id, body: match.body };
         if (list.length < 100) return null;
@@ -851,6 +851,7 @@ export function createApi(env, {
 }
 
 async function main() {
+  const { appendFileSync, readFileSync } = await import('node:fs');
   const env = process.env;
   if (!env.GITHUB_EVENT_PATH) throw new PreviewError('Missing GitHub event path');
   const parse = text => {
@@ -886,7 +887,9 @@ async function main() {
   if (['required-unavailable', 'failed', 'push-needed'].includes(result.state)) process.exitCode = 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
+if (typeof process !== 'undefined' && process.argv?.[1] &&
+    import.meta.url === (await import('node:url')).pathToFileURL(process.argv[1]).href) main().catch(async error => {
+  const { appendFileSync } = await import('node:fs');
   const reason = failureReason(error);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Preview authentication\n- Overall: failed — ${reason}\n`);
   console.error(`Preview auth failed — ${reason}`);
