@@ -1074,3 +1074,18 @@ test('decommission closes existing comments with a repository-level note', async
   await f.run({ ...dispatch, comments: f.comments, runUrl });
   assert.match(f.state.comments[0].body, /turned off for this repository/);
 });
+
+test('a sweep keeps the comment when only a retired app alias is removed from an open PR', async () => {
+  const live = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ apps: [open], aliases: [mapping(web)], initialComments: [live] });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(f.state.aliases.size, 0);
+  assert.equal(f.state.comments[0].body, `${COMMENT_MARKER}\nready`);
+});
+
+test('a sweep that removes only a callback for a closed PR closes its comment', async () => {
+  const stale = { id: 5, user: { login: 'github-actions[bot]', type: 'Bot' }, body: `${COMMENT_MARKER}\nready` };
+  const f = fixture({ pr: closedPr, clientUris: { 'web-dev': [webUri] }, initialComments: [stale] });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, /Previews and sign-in callbacks removed/);
+});
