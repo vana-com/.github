@@ -447,7 +447,7 @@ export async function previewAuth({
   }
   // Never claim removal when this run has failures: the daily sweep retries cleanup.
   const closeNote = () => failures.length
-    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete; the daily sweep retries it.' : undefined;
+    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.' : undefined;
   // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
   const openComment = async pr => {
     let latest;
