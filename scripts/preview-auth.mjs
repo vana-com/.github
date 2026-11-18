@@ -63,6 +63,56 @@ export function previewHost(app, pr, domain) {
   return host;
 }
 
+export const COMMENT_MARKER = '<!-- vana-preview-auth -->';
+const COMMENT_AUTHOR = 'github-actions[bot]';
+const RUN_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[0-9]+$/;
+const STATE_LABEL = {
+  ready: '✅ Ready',
+  updating: '🔄 Updating (showing the previous commit)',
+  building: '⏳ Building',
+  publishing: '⏳ Publishing the alias',
+  failed: '❌ Build failed',
+  canceled: '⚠️ Build canceled',
+  unavailable: '⚠️ Not available (needs a preview database)',
+  unknown: '⚠️ Status unavailable',
+};
+const APP_NOTE = { metrics: 'Vercel sign-in required' };
+
+// Pure render. Rows: { app, host, state }. Only validated hosts and fixed strings reach the body.
+export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = false, closedNote, domain = 'vana.boo' }) {
+  const run = RUN_URL.test(runUrl ?? '') ? runUrl : null;
+  if (closed) {
+    return [COMMENT_MARKER, '### Preview deployments', '',
+      closedNote ?? 'This PR is closed or no longer targets the preview branch. Previews and sign-in callbacks were removed.'].join('\n');
+  }
+  const lines = [COMMENT_MARKER, '### Preview deployments', '',
+    `Commit \`${String(sha).slice(0, 7)}\`${run ? ` · [Preview auth run](${run})` : ''}`, '',
+    '| App | Preview | Status |', '|---|---|---|'];
+  for (const { app, host, state } of rows) {
+    const label = STATE_LABEL[state] ?? STATE_LABEL.unknown;
+    const detail = state === 'failed' && run ? `${label} — [run log](${run})` : label;
+    const note = APP_NOTE[app] ? ` (${APP_NOTE[app]})` : '';
+    const link = ['ready', 'updating'].includes(state) ? `[${host}](https://${host})` : `\`${host}\``;
+    lines.push(`| ${app} | ${link}${note} | ${detail} |`);
+  }
+  lines.push('', `Sign in with your normal Vana account (Account dev); it returns to the \`${domain}\` link. Open the \`${domain}\` URL, not the raw Vercel URL. Previews share dev data.`,
+    `Pushing a commit rebuilds and updates this comment. PR #${pr}`);
+  return lines.join('\n');
+}
+
+// One sticky comment per PR, found by the marker on a comment written by the Actions bot.
+export async function upsertPreviewComment(comments, pr, body, { createIfMissing = true } = {}) {
+  const existing = await comments.find(pr);
+  if (!existing) {
+    if (!createIfMissing) return 'skipped';
+    await comments.create(pr, body);
+    return 'created';
+  }
+  if (existing.body === body) return 'unchanged';
+  await comments.update(existing.id, body);
+  return 'updated';
+}
+
 function validCallbackPath(path) {
   return typeof path === 'string' && CALLBACK_PATH.test(path) && !path.split('/').some(segment => segment === '.' || segment === '..');
 }
@@ -149,7 +199,7 @@ export async function resolveSignalPulls(repo, event, api) {
 }
 
 export async function previewAuth({
-  eventName, event, repo, matrix, domain, targetBranch, decommission = false, reportBuildOutcome = false, api, alias,
+  eventName, event, repo, matrix, domain, targetBranch, decommission = false, reportBuildOutcome = false, api, alias, comments, runUrl,
 }) {
   if (eventName === 'workflow_run' && !decommission) {
     const prs = await resolveSignalPulls(repo, event, api);
@@ -157,17 +207,19 @@ export async function previewAuth({
     for (const pr of prs) {
       const action = pr.state === 'open' && pr.base?.ref === targetBranch ? 'reopened' : 'closed';
       outcomes.push(await previewAuth({
-        eventName: 'pull_request_target', event: { action, pull_request: pr }, repo, matrix, domain, targetBranch, api, alias,
+        eventName: 'pull_request_target', event: { action, pull_request: pr }, repo, matrix, domain, targetBranch, api, alias, comments, runUrl,
         reportBuildOutcome: event.workflow_run.event === 'deployment_status',
       }));
     }
     const failures = outcomes.flatMap(result => result.failures ?? []);
     const results = outcomes.flatMap(result => result.results ?? []);
+    const warnings = outcomes.flatMap(result => result.warnings ?? []);
     const outcomesByPriority = ['failed', 'required-unavailable', 'published', 'awaiting-deployment', 'cleanup-checked'];
     return {
       state: outcomesByPriority.find(state => outcomes.some(result => result.state === state)) ?? 'ignored',
       ...(failures.length ? { failures } : {}),
       ...(results.length ? { results } : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
   const cleanupEvent = eventName === 'pull_request_target' && ['closed', 'edited'].includes(event.action);
@@ -179,7 +231,7 @@ export async function previewAuth({
     .map(([app, [, project_id]]) => ({ app, project_id }));
   if (!ownedApps.length) throw new PreviewError('Unknown preview repository ownership');
   const byApp = new Map();
-  const failures = [], results = [], pushNeeded = new Set();
+  const failures = [], results = [], warnings = [], pushNeeded = new Set();
   const fail = (app, operation, error) => failures.push({ app, operation, reason: failureReason(error) });
   const attempt = async (app, operation, fn) => {
     try { return await fn(); }
@@ -205,6 +257,7 @@ export async function previewAuth({
     ...(failures.length ? { failures } : {}),
     ...(results.length ? { results } : {}),
     ...(pushNeeded.size ? { pushNeeded: [...pushNeeded] } : {}),
+    ...(warnings.length ? { warnings } : {}),
   });
   if (!targetBranch || !/^[A-Za-z0-9._/-]+$/.test(targetBranch)) throw new PreviewError('Invalid target branch');
   for (const { app } of ownedApps) previewHost(app, 1, domain);
@@ -361,6 +414,58 @@ export async function previewAuth({
     return 'redeploy-requested';
   }
 
+  // Cosmetic only: a comment problem is reported as a warning and never fails the run.
+  const writeComment = async (number, build, createIfMissing) => {
+    if (!comments) return;
+    try { await upsertPreviewComment(comments, number, await build(), { createIfMissing }); }
+    catch (error) { warnings.push(`comment on PR #${number}: ${failureReason(error)}`); }
+  };
+  async function appState(app, pr) {
+    const host = previewHost(app.app, pr.number, domain);
+    const row = state => ({ app: app.app, host, state });
+    try {
+      if (provisioningState(app) !== 'not-required') return row('unavailable');
+      const sha = pr.head.sha;
+      const needsPrContext = PR_CONTEXT_APPS.has(app.app);
+      const existing = await readAlias(host);
+      // Advertise a link only when the alias points at one of this app's own deployments.
+      const mapping = existing?.deploymentId && ownedDeployment(await readTarget(existing.deploymentId), app) ? existing : null;
+      const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}`, null, app);
+      let latest;
+      for (const item of candidates ?? []) {
+        const detail = item.uid ? await readTarget(item.uid) : null;
+        if (ownedDeployment(detail, app) && detail.meta.githubCommitSha === sha &&
+            (!needsPrContext || hasPrContext(detail, pr)) &&
+            (!latest || (detail.createdAt ?? 0) > (latest.createdAt ?? 0))) latest = detail;
+      }
+      if (!latest) return row(mapping ? 'updating' : 'building');
+      if (latest.readyState === 'ERROR') return row('failed');
+      if (latest.readyState === 'CANCELED') return row('canceled');
+      if (latest.readyState !== 'READY') return row(mapping ? 'updating' : 'building');
+      return row(mapping?.deploymentId === latest.id ? 'ready' : 'publishing');
+    } catch { return row('unknown'); }
+  }
+  // Never claim removal when this run has failures: the daily sweep retries cleanup.
+  const closeNote = () => failures.length
+    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.' : undefined;
+  // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
+  const openComment = async pr => {
+    let latest;
+    try { latest = await pull(pr.number); }
+    catch (error) { warnings.push(`comment on PR #${pr.number}: ${failureReason(error)}`); return; }
+    if (!eligiblePr(latest)) {
+      await writeComment(pr.number, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
+      return;
+    }
+    if (latest.head.sha !== pr.head.sha) return;
+    await writeComment(pr.number, async () => renderPreviewComment({
+      pr: pr.number, sha: pr.head.sha, runUrl, domain,
+      rows: (await Promise.all([...byApp.values()].map(app => appState(app, pr)))).map(row =>
+        // A run that failed for this app must not leave a spinner behind.
+        ['building', 'publishing'].includes(row.state) && failures.some(f => f.app === row.app) ? { ...row, state: 'failed' } : row),
+    }), true);
+  };
+
   if (eventName === 'pull_request_target' && !cleanupEvent) {
     const pr = event.pull_request;
     if (!['opened', 'reopened', 'synchronize'].includes(event.action) || !SHA.test(pr.head?.sha ?? '')) return finish('ignored');
@@ -374,6 +479,7 @@ export async function previewAuth({
       });
       if (state) results.push({ app: app.app, state });
     }
+    await openComment(current);
     const state = results.some(item => item.state === 'required-unavailable') ? 'required-unavailable'
       : results.some(item => item.state === 'published') ? 'published' : 'awaiting-deployment';
     return finish(state);
@@ -383,6 +489,7 @@ export async function previewAuth({
     const onlyPr = cleanupEvent ? String(event.pull_request.number) : null;
     if (onlyPr && !PR_NUMBER.test(onlyPr)) throw new PreviewError('Invalid pull request number');
     const repair = [];
+    const commentPrs = new Map();
     const aliasHostsByApp = new Map();
     // Clean every owned Vercel project before trying Account, even when the matrix has drifted.
     for (const app of ownedApps) {
@@ -451,13 +558,25 @@ export async function previewAuth({
             await attempt(app.app, `recover PR #${pr.number} preview`, async () => {
               const state = await reconcileBuild(app, pr, { onlyMissingAlias: true });
               if (state === 'published') aliases.add(host);
-              if (state === 'published' || state === 'redeploy-requested') results.push({ app: app.app, state });
+              if (state === 'published' || state === 'redeploy-requested') {
+                results.push({ app: app.app, state });
+                commentPrs.set(pr.number, pr);
+              }
             });
           }
         }
         if (prs.length < perPage) break;
       }
     }
+    if (cleanupEvent && !decommission && comments) {
+      // Update an existing comment only: closed PRs that never had a preview get none.
+      try {
+        if (!eligiblePr(await pull(onlyPr))) {
+          await writeComment(onlyPr, async () => renderPreviewComment({ closed: true, closedNote: closeNote() }), false);
+        }
+      } catch (error) { warnings.push(`comment on PR #${onlyPr}: ${failureReason(error)}`); }
+    }
+    for (const pr of commentPrs.values()) await openComment(pr);
     return finish(decommission ? 'decommissioned' : pushNeeded.size ? 'push-needed' : 'cleanup-checked');
   }
 
@@ -473,20 +592,30 @@ export async function previewAuth({
   const success = event.deployment_status.state === 'success';
   if (!success && !PR_CONTEXT_APPS.has(app.app)) {
     fail(app.app, 'build preview', new PreviewError('Deployment failed'));
+    // Best effort: show the failed build on the PR. A lookup problem only adds a warning.
+    try {
+      const matches = await api('github', `/repos/${repo}/commits/${event.deployment.sha}/pulls`);
+      const pr = matches.find(candidate => currentHead(candidate, event.deployment.sha));
+      if (pr) await openComment(pr);
+    } catch (error) { warnings.push(`comment: ${failureReason(error)}`); }
     return finish('failed');
   }
   if (success && deployment.readyState !== 'READY') return finish('ignored');
   const sha = event.deployment.sha;
+  let verifiedPr = null;
   const state = await attempt(app.app, 'publish preview', async () => {
     const matches = await api('github', `/repos/${repo}/commits/${sha}/pulls`);
     const pr = matches.find(candidate => currentHead(candidate, sha));
     if (!pr) return 'ignored';
+    verifiedPr = pr;
     if (!success && beforePr(deployment, pr) !== true) {
       fail(app.app, 'build preview', new PreviewError('Deployment failed'));
       return 'failed';
     }
     return await reconcileBuild(app, pr, { reported: deployment }) ?? 'awaiting-deployment';
   });
+  // Refresh the sticky comment after success, failure or a pending build alike.
+  if (verifiedPr) await openComment(verifiedPr);
   return { ...finish(state), app: app.app };
 }
 
@@ -627,7 +756,30 @@ export function createApi(env, {
     }
     throw new PreviewError(action === 'rm' ? 'Alias removal unconfirmed' : 'Alias assignment unconfirmed');
   };
-  return { api, alias };
+  const issueComments = number => {
+    if (!PR_NUMBER.test(String(number)) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? '')) {
+      throw new PreviewError('Invalid pull request comment target');
+    }
+    return `/repos/${env.GITHUB_REPOSITORY}/issues/${number}/comments`;
+  };
+  const comments = {
+    async find(number) {
+      for (let page = 1; ; page++) {
+        const list = await request('github', `${issueComments(number)}?per_page=100&page=${page}`);
+        if (!Array.isArray(list)) throw new PreviewError('GitHub returned an invalid comment list');
+        const match = list.find(c => c?.user?.login === COMMENT_AUTHOR && c.user.type === 'Bot' &&
+          typeof c.body === 'string' && c.body.startsWith(COMMENT_MARKER) && Number.isSafeInteger(c.id));
+        if (match) return { id: match.id, body: match.body };
+        if (list.length < 100) return null;
+      }
+    },
+    create: (number, body) => request('github', issueComments(number), { method: 'POST', body: { body }, attempts: 1 }),
+    update: (id, body) => {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new PreviewError('Invalid comment id');
+      return request('github', `/repos/${env.GITHUB_REPOSITORY}/issues/comments/${id}`, { method: 'PATCH', body: { body } });
+    },
+  };
+  return { api, alias, comments };
 }
 
 async function main() {
@@ -652,12 +804,14 @@ async function main() {
   const result = await previewAuth({
     eventName: env.GITHUB_EVENT_NAME, event, repo: env.GITHUB_REPOSITORY, matrix: parse(env.APP_MATRIX),
     domain: env.PREVIEW_DOMAIN, targetBranch: env.TARGET_BRANCH, decommission: env.PREVIEW_AUTH_DECOMMISSION === 'true', ...adapters,
+    runUrl: `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`,
   });
   console.log(`Preview auth: ${result.state}${result.app ? ` (${result.app})` : ''}`);
   for (const host of result.pushNeeded ?? []) console.log(`Preview needs a new push: ${host}`);
   const lines = [
     ...(result.results ?? []).map(r => `- ${r.app}: ${r.state}`),
     ...(result.failures ?? []).map(f => `- ${f.app}: ${f.operation} failed — ${f.reason}`),
+    ...(result.warnings ?? []).map(w => `- warning: ${w}`),
   ];
   for (const line of lines) console.log(line);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `## Preview authentication\n- Overall: ${result.state}\n${lines.length ? lines.join('\n') + '\n' : ''}`);
