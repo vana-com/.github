@@ -79,7 +79,7 @@ const STATE_LABEL = {
 const APP_NOTE = { metrics: 'Vercel sign-in required' };
 
 // Pure render. Rows: { app, host, state }. Only validated hosts and fixed strings reach the body.
-export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = false, closedNote }) {
+export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = false, closedNote, domain = 'vana.boo' }) {
   const run = RUN_URL.test(runUrl ?? '') ? runUrl : null;
   if (closed) {
     return [COMMENT_MARKER, '### Preview deployments', '',
@@ -95,7 +95,7 @@ export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = fals
     const link = ['ready', 'updating'].includes(state) ? `[${host}](https://${host})` : `\`${host}\``;
     lines.push(`| ${app} | ${link}${note} | ${detail} |`);
   }
-  lines.push('', 'Sign in with your normal Vana account (Account dev); it returns to the `vana.boo` link. Open the `vana.boo` URL, not the raw Vercel URL. Previews share dev data.',
+  lines.push('', `Sign in with your normal Vana account (Account dev); it returns to the \`${domain}\` link. Open the \`${domain}\` URL, not the raw Vercel URL. Previews share dev data.`,
     `Pushing a commit rebuilds and updates this comment. PR #${pr}`);
   return lines.join('\n');
 }
@@ -435,7 +435,7 @@ export async function previewAuth({
       for (const item of candidates ?? []) {
         const detail = item.uid ? await readTarget(item.uid) : null;
         if (ownedDeployment(detail, app) && detail.meta.githubCommitSha === sha &&
-            (!needsPrContext || hasPrContext(detail, pr) || sameGitHead(detail, pr)) &&
+            (!needsPrContext || hasPrContext(detail, pr)) &&
             (!latest || (detail.createdAt ?? 0) > (latest.createdAt ?? 0))) latest = detail;
       }
       if (!latest) return row(mapping ? 'updating' : 'building');
@@ -459,7 +459,10 @@ export async function previewAuth({
     }
     if (latest.head.sha !== pr.head.sha) return;
     await writeComment(pr.number, async () => renderPreviewComment({
-      pr: pr.number, sha: pr.head.sha, runUrl, rows: await Promise.all([...byApp.values()].map(app => appState(app, pr))),
+      pr: pr.number, sha: pr.head.sha, runUrl, domain,
+      rows: (await Promise.all([...byApp.values()].map(app => appState(app, pr)))).map(row =>
+        // A run that failed for this app must not leave a spinner behind.
+        ['building', 'publishing'].includes(row.state) && failures.some(f => f.app === row.app) ? { ...row, state: 'failed' } : row),
     }), true);
   };
 

@@ -1040,3 +1040,19 @@ test('a PR lookup failure after a successful cleanup is a warning, not a failed 
   assert.equal(result.failures, undefined);
   assert.ok(result.warnings?.length);
 });
+
+test('a publication failure shows the app as failed, not as a permanent spinner', async () => {
+  const f = fixture({
+    apps: [web], deployments: [deployment(web)],
+    intercept: ({ origin, method }) => origin === 'https://account-dev.vana.org' && method === 'POST' ? json({}, 503) : undefined,
+  });
+  const result = await f.run({ ...pullEvent('reopened'), comments: f.comments, runUrl });
+  assert.equal(result.state, 'failed');
+  assert.match(f.state.comments[0].body, /\| web \| `web-pr-12.vana.boo` \| ❌ Build failed/);
+});
+
+test('the sign-in note names the configured preview domain', () => {
+  const body = renderPreviewComment({ pr: 12, sha, runUrl, domain: 'previews.example.test', rows: [] });
+  assert.match(body, /`previews.example.test` URL/);
+  assert.equal(body.includes('vana.boo'), false);
+});
