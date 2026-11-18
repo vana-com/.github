@@ -28,7 +28,7 @@ permissions:
   pull-requests: read
   deployments: read
 env:
-  TRUSTED_PREVIEW_AUTH_REF: f043f359ea1317d103504f60df6d475ea01948de
+  TRUSTED_PREVIEW_AUTH_REF: 76b77490d3b89cc31d4111870713ef2d86d85036
 jobs:
   admission:
     if: >-
