@@ -63,6 +63,14 @@ export function previewHost(app, pr, domain) {
   return host;
 }
 
+// Vercel cancels a build at once when the commit changed nothing in the app (monorepo skip or an
+// Ignored Build Step). Such a deployment has canceledAt equal to createdAt, an errorLink to the
+// "skipping unaffected projects" docs and a readyStateReason saying the commit did not affect the project.
+export function isSkippedBuild(deployment) {
+  return /skipping-unaffected-projects/.test(deployment?.errorLink ?? '') ||
+    /didn.t affect this project|ignored build step/i.test(deployment?.readyStateReason ?? '');
+}
+
 export const COMMENT_MARKER = '<!-- vana-preview-auth -->';
 const COMMENT_AUTHOR = 'github-actions[bot]';
 const RUN_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[0-9]+$/;
@@ -73,6 +81,9 @@ const STATE_LABEL = {
   publishing: '⏳ Setting up preview URL',
   failed: '❌ Build failed',
   canceled: '⚠️ Build canceled',
+  'canceled-previous': '⚠️ Build canceled · showing previous build',
+  'ready-previous': '✅ Ready (previous build)',
+  skipped: '➖ No changes for this app',
   unavailable: '⚠️ Preview database required',
   unknown: '⚠️ Status unavailable',
 };
@@ -92,7 +103,7 @@ export function renderPreviewComment({ pr, sha, runUrl, rows = [], closed = fals
     const label = STATE_LABEL[state] ?? STATE_LABEL.unknown;
     const detail = state === 'failed' && run ? `${label} — [View logs](${run})` : label;
     const note = APP_NOTE[app] ? ` (${APP_NOTE[app]})` : '';
-    const link = ['ready', 'updating'].includes(state) ? `[${host}](https://${host})` : `\`${host}\``;
+    const link = ['ready', 'updating', 'ready-previous', 'canceled-previous'].includes(state) ? `[${host}](https://${host})` : `\`${host}\``;
     lines.push(`| ${app} | ${link}${note} | ${detail} |`);
   }
   lines.push('', `Open the \`${domain}\` links above, not the raw Vercel URLs. Sign in with your Vana account (dev); you'll return to the preview URL. Previews share dev data.`);
@@ -199,7 +210,9 @@ export async function resolveSignalPulls(repo, event, api) {
 
 export async function previewAuth({
   eventName, event, repo, matrix, domain, targetBranch, decommission = false, reportBuildOutcome = false, api, alias, comments, runUrl,
+  now = Date.now, softDeadlineMs = 11 * 60 * 1000, commentConcurrency = 4,
 }) {
+  const startedAt = now();
   if (eventName === 'workflow_run' && !decommission) {
     const prs = await resolveSignalPulls(repo, event, api);
     const outcomes = [];
@@ -287,8 +300,16 @@ export async function previewAuth({
   const readTarget = id => api('vercel', `/deployments/${encodeURIComponent(id)}`);
   const readAlias = host => api('vercel', `/aliases/${encodeURIComponent(host)}`);
   const callbacks = app => [...new Set(app.callback_paths)];
+  const openNumbers = new Set();
+  const openPrs = [];
+  const commentPrs = new Map();
+  const removedPrs = new Set();
+  const aliasHostsByApp = new Map();
   const shouldClean = async (app, pr) => {
     if (decommission || (sweep && canDetectRetiredApps && !byApp.has(app.app))) return true;
+    // The sweep lists open PRs once at its start. Keeping a listed PR errs on the safe side (cleanup waits a day),
+    // and it saves one GitHub read per alias. Anything not listed is still confirmed with a live read.
+    if (sweep && openNumbers.has(String(pr))) return false;
     return !eligiblePr(await pull(pr));
   };
   const recoveryPr = async (pr, deployment) => !currentHead(await pull(pr), deployment.meta.githubCommitSha);
@@ -429,7 +450,8 @@ export async function previewAuth({
       const needsPrContext = PR_CONTEXT_APPS.has(app.app);
       const existing = await readAlias(host);
       // Advertise a link only when the alias points at one of this app's own deployments.
-      const mapping = existing?.deploymentId && ownedDeployment(await readTarget(existing.deploymentId), app) ? existing : null;
+      const aliasTarget = existing?.deploymentId ? await readTarget(existing.deploymentId) : null;
+      const mapping = ownedDeployment(aliasTarget, app) ? existing : null;
       const candidates = await api('vercel', `/deployments?sha=${encodeURIComponent(sha)}`, null, app);
       let latest;
       for (const item of candidates ?? []) {
@@ -440,7 +462,13 @@ export async function previewAuth({
       }
       if (!latest) return row(mapping ? 'updating' : 'building');
       if (latest.readyState === 'ERROR') return row('failed');
-      if (latest.readyState === 'CANCELED') return row('canceled');
+      if (latest.readyState === 'CANCELED') {
+        // The alias keeps serving an earlier READY build. A build Vercel skipped because the commit did not
+        // touch this app is healthy. A build that was really canceled means this commit is not deployed.
+        const servingEarlier = mapping && mapping.deploymentId !== latest.id && aliasTarget.readyState === 'READY';
+        if (isSkippedBuild(latest)) return row(servingEarlier ? 'ready-previous' : 'skipped');
+        return row(servingEarlier ? 'canceled-previous' : 'canceled');
+      }
       if (latest.readyState !== 'READY') return row(mapping ? 'updating' : 'building');
       return row(mapping?.deploymentId === latest.id ? 'ready' : 'publishing');
     } catch { return row('unknown'); }
@@ -449,7 +477,7 @@ export async function previewAuth({
   const closeNote = () => failures.length
     ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. Rerun Preview auth from the Actions tab to retry.' : undefined;
   // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
-  const openComment = async pr => {
+  const openComment = async (pr, { createIfMissing = true, applyFailures = true } = {}) => {
     let latest;
     try { latest = await pull(pr.number); }
     catch (error) { warnings.push(`comment on PR #${pr.number}: ${failureReason(error)}`); return; }
@@ -462,9 +490,30 @@ export async function previewAuth({
       pr: pr.number, sha: pr.head.sha, runUrl, domain,
       rows: (await Promise.all([...byApp.values()].map(app => appState(app, pr)))).map(row =>
         // A run that failed for this app must not leave a spinner behind.
-        ['building', 'publishing'].includes(row.state) && failures.some(f => f.app === row.app) ? { ...row, state: 'failed' } : row),
-    }), true);
+        applyFailures && ['building', 'publishing'].includes(row.state) && failures.some(f => f.app === row.app) ? { ...row, state: 'failed' } : row),
+    }), createIfMissing);
   };
+
+  // Branches created before the deployment signal workflow existed never receive a deployment_status run, so
+  // their comment would stay at the state of the push event. The sweep re-renders every open PR's comment from
+  // live state. It updates an existing comment, and creates one only when the PR already has a live preview alias.
+  // Work stops starting at the soft deadline; the rotation spreads the unfinished PRs across days.
+  async function refreshComments() {
+    const todo = openPrs.filter(pr => !commentPrs.has(pr.number));
+    if (!todo.length) return;
+    const offset = Math.floor(now() / 86400000) % todo.length;
+    const queue = [...todo.slice(offset), ...todo.slice(0, offset)];
+    let skipped = 0;
+    const worker = async () => {
+      for (let pr = queue.shift(); pr; pr = queue.shift()) {
+        if (now() - startedAt > softDeadlineMs) { skipped += 1 + queue.length; queue.length = 0; return; }
+        const live = [...byApp.values()].some(app => aliasHostsByApp.get(app.app)?.has(previewHost(app.app, pr.number, domain)));
+        await openComment(pr, { createIfMissing: live, applyFailures: false });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(commentConcurrency, queue.length) }, worker));
+    if (skipped) warnings.push(`comment refresh reached its time limit; ${skipped} PRs wait for the next run`);
+  }
 
   if (eventName === 'pull_request_target' && !cleanupEvent) {
     const pr = event.pull_request;
@@ -489,9 +538,24 @@ export async function previewAuth({
     const onlyPr = cleanupEvent ? String(event.pull_request.number) : null;
     if (onlyPr && !PR_NUMBER.test(onlyPr)) throw new PreviewError('Invalid pull request number');
     const repair = [];
-    const commentPrs = new Map();
-    const removedPrs = new Set();
-    const aliasHostsByApp = new Map();
+    if (sweep && !decommission) {
+      const perPage = 100;
+      const listUrl = `/repos/${repo}/pulls?state=open&base=${encodeURIComponent(targetBranch)}&sort=created&direction=asc&per_page=${perPage}`;
+      for (let page = 1; ; page++) {
+        const prs = await attempt('GitHub', 'list open pull requests', async () => {
+          const listed = await api('github', `${listUrl}&page=${page}`);
+          if (!Array.isArray(listed)) throw new PreviewError('GitHub returned an invalid pull request list');
+          return listed;
+        });
+        if (!prs?.length) break;
+        for (const pr of prs) {
+          if (!eligiblePr(pr) || !SHA.test(pr.head?.sha ?? '') || !PR_NUMBER.test(String(pr.number))) continue;
+          openPrs.push(pr);
+          openNumbers.add(String(pr.number));
+        }
+        if (prs.length < perPage) break;
+      }
+    }
     // Clean every owned Vercel project before trying Account, even when the matrix has drifted.
     for (const app of ownedApps) {
       const aliases = onlyPr ? [{ alias: previewHost(app.app, onlyPr, domain) }]
@@ -540,33 +604,21 @@ export async function previewAuth({
 
     if (sweep && !decommission) {
       // An interrupted first publish can leave neither an alias nor a callback.
-      const perPage = 100;
-      const openPulls = `/repos/${repo}/pulls?state=open&base=${encodeURIComponent(targetBranch)}&sort=created&direction=asc&per_page=${perPage}`;
-      for (let page = 1; ; page++) {
-        const prs = await attempt('GitHub', 'list open pull requests', async () => {
-          const listed = await api('github', `${openPulls}&page=${page}`);
-          if (!Array.isArray(listed)) throw new PreviewError('GitHub returned an invalid pull request list');
-          return listed;
-        });
-        if (!prs?.length) break;
-        for (const pr of prs) {
-          if (!eligiblePr(pr) || !SHA.test(pr.head?.sha ?? '') || !PR_NUMBER.test(String(pr.number))) continue;
-          for (const app of byApp.values()) {
-            const aliases = aliasHostsByApp.get(app.app);
-            if (!aliases || provisioningState(app) !== 'not-required') continue;
-            const host = previewHost(app.app, pr.number, domain);
-            if (aliases.has(host)) continue;
-            await attempt(app.app, `recover PR #${pr.number} preview`, async () => {
-              const state = await reconcileBuild(app, pr, { onlyMissingAlias: true });
-              if (state === 'published') aliases.add(host);
-              if (state === 'published' || state === 'redeploy-requested') {
-                results.push({ app: app.app, state });
-                commentPrs.set(pr.number, pr);
-              }
-            });
-          }
+      for (const pr of openPrs) {
+        for (const app of byApp.values()) {
+          const aliases = aliasHostsByApp.get(app.app);
+          if (!aliases || provisioningState(app) !== 'not-required') continue;
+          const host = previewHost(app.app, pr.number, domain);
+          if (aliases.has(host)) continue;
+          await attempt(app.app, `recover PR #${pr.number} preview`, async () => {
+            const state = await reconcileBuild(app, pr, { onlyMissingAlias: true });
+            if (state === 'published') aliases.add(host);
+            if (state === 'published' || state === 'redeploy-requested') {
+              results.push({ app: app.app, state });
+              commentPrs.set(pr.number, pr);
+            }
+          });
         }
-        if (prs.length < perPage) break;
       }
     }
     if (cleanupEvent && !decommission && comments) {
@@ -592,6 +644,7 @@ export async function previewAuth({
       }
     }
     for (const pr of commentPrs.values()) await openComment(pr);
+    if (sweep && !decommission && comments) await refreshComments();
     return finish(decommission ? 'decommissioned' : pushNeeded.size ? 'push-needed' : 'cleanup-checked');
   }
 

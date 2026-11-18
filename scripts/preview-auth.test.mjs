@@ -1080,7 +1080,8 @@ test('a sweep keeps the comment when only a retired app alias is removed from an
   const f = fixture({ apps: [open], aliases: [mapping(web)], initialComments: [live] });
   await f.run({ ...sweep, comments: f.comments, runUrl });
   assert.equal(f.state.aliases.size, 0);
-  assert.equal(f.state.comments[0].body, `${COMMENT_MARKER}\nready`);
+  assert.doesNotMatch(f.state.comments[0].body, /removed|closed/);
+  assert.match(f.state.comments[0].body, /Commit `aaaaaaa`/);
 });
 
 test('a sweep that removes only a callback for a closed PR closes its comment', async () => {
@@ -1100,4 +1101,93 @@ test('a sweep still closes a removed preview comment when another cleanup fails,
   assert.equal(f.state.aliases.size, 0);
   assert.ok(result.failures.length);
   assert.match(f.state.comments[0].body, /removal is incomplete/);
+});
+
+const botComment = (body, id = 5) => ({ id, user: { login: 'github-actions[bot]', type: 'Bot' }, body });
+const staleBody = renderPreviewComment({ pr: 12, sha, runUrl: undefined, rows: [{ app: 'web', host: host('web'), state: 'publishing' }] });
+const skippedBuild = (app, details) => deployment(app, {
+  id: 'dpl_skipped', readyState: 'CANCELED', createdAt: prOpenedMs + 5000, canceledAt: prOpenedMs + 5000,
+  errorLink: 'https://vercel.com/docs/monorepos#skipping-unaffected-projects',
+  readyStateReason: 'The deployment was canceled because the commit didn\u2019t affect this project.', ...details,
+});
+const olderBuild = (app, details) => deployment(app, {
+  id: 'dpl_earlier', createdAt: prOpenedMs + 1000, ...details,
+  meta: { ...deployment(app).meta, githubCommitSha: nextSha }, gitSource: { ...deployment(app).gitSource, sha: nextSha },
+});
+
+test('a sweep refreshes a stale comment on an old branch that never receives the deployment signal', async () => {
+  const f = fixture({ apps: [web], aliases: [mapping(web)], initialComments: [botComment(staleBody)] });
+  const result = await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(result.failures, undefined);
+  assert.match(f.state.comments[0].body, new RegExp(`\\| web \\| \\[${host('web')}\\]\\(https://${host('web')}\\) \\| ✅ Ready \\|`));
+  assert.equal(f.state.comments.length, 1);
+  // A second sweep finds nothing to change.
+  const before = f.writes().length;
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.equal(f.writes().length, before);
+});
+
+test('a sweep creates a missing comment only when the PR already has a live preview alias', async () => {
+  const live = fixture({ apps: [web], aliases: [mapping(web)] });
+  await live.run({ ...sweep, comments: live.comments, runUrl });
+  assert.equal(live.state.comments.length, 1);
+  const none = fixture({ apps: [web], aliases: [], deployments: [] });
+  await none.run({ ...sweep, comments: none.comments, runUrl });
+  assert.deepEqual(none.state.comments, []);
+});
+
+test('a sweep does not mark apps failed on other PRs when one alias repair fails', async () => {
+  const f = fixture({
+    apps: [web], aliases: [mapping(web)], deployments: [deployment(web, { readyState: 'BUILDING' })],
+    initialComments: [botComment(staleBody)],
+    intercept: ({ origin, path }) => origin === 'https://api.vercel.com' && path === '/v4/aliases' ? json({}, 500) : undefined,
+  });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.doesNotMatch(f.state.comments[0].body, /Build failed/);
+});
+
+test('a skipped build whose alias still serves an earlier READY build reads as ready, not as a warning', async () => {
+  const earlier = olderBuild(open);
+  const f = fixture({
+    apps: [open], aliases: [mapping(open, 'dpl_earlier')], deployments: [earlier, skippedBuild(open)],
+    initialComments: [botComment(staleBody)],
+  });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, new RegExp(`\\| open \\| \\[${host('open')}\\]\\(https://${host('open')}\\) \\| ✅ Ready \\(previous build\\) \\|`));
+  assert.doesNotMatch(f.state.comments[0].body, /canceled/i);
+});
+
+test('a really canceled build still warns, and says the previous build is what is served', async () => {
+  const cancel = skippedBuild(open, { errorLink: undefined, readyStateReason: undefined, canceledAt: prOpenedMs + 60000 });
+  const f = fixture({
+    apps: [open], aliases: [mapping(open, 'dpl_earlier')], deployments: [olderBuild(open), cancel],
+    initialComments: [botComment(staleBody)],
+  });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, /⚠️ Build canceled · showing previous build/);
+  const bare = fixture({ apps: [open], aliases: [], deployments: [cancel], initialComments: [botComment(staleBody)] });
+  await bare.run({ ...sweep, comments: bare.comments, runUrl });
+  assert.match(bare.state.comments[0].body, /⚠️ Build canceled \|/);
+});
+
+test('a skipped build with no alias reads as no changes, not as a failure', async () => {
+  const f = fixture({ apps: [open], aliases: [], deployments: [skippedBuild(open)], initialComments: [botComment(staleBody)] });
+  await f.run({ ...sweep, comments: f.comments, runUrl });
+  assert.match(f.state.comments[0].body, /➖ No changes for this app/);
+});
+
+test('the comment refresh stops at the soft deadline, reports it and never fails the run', async () => {
+  let clock = 0;
+  const f = fixture({ apps: [web], aliases: [mapping(web)], initialComments: [botComment(staleBody)] });
+  const result = await f.run({ ...sweep, comments: f.comments, runUrl, now: () => (clock += 1000), softDeadlineMs: 500 });
+  assert.equal(result.failures, undefined);
+  assert.match(result.warnings.join('\n'), /comment refresh reached its time limit; 1 PRs wait/);
+  assert.equal(f.state.comments[0].body, staleBody);
+});
+
+test('the sweep reads each listed open PR once for cleanup instead of once per alias', async () => {
+  const f = fixture({ apps: [web, account, open], aliases: [mapping(web), mapping(account), mapping(open)] });
+  await f.run({ ...sweep });
+  const reads = f.calls.filter(c => c.origin === 'https://api.github.com' && /\/pulls\/12$/.test(c.path));
+  assert.ok(reads.length <= 3, `PR reads: ${reads.length}`);
 });
