@@ -1,3 +1,4 @@
+// Convert the GitHub App key to PKCS8 with openssl pkcs8 -topk8 -nocrypt before storing it.
 // Paths are relative to this config: index.mjs is workers/preview-auth/index.mjs.
 // nodejs_compat is required for the core CLI-only dynamic node imports at bundle time.
 {

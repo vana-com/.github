@@ -209,6 +209,7 @@ export async function resolveSignalPulls(repo, event, api) {
 export async function previewAuth({
   eventName, event, repo, matrix, domain, targetBranch, decommission = false, reportBuildOutcome = false, api, alias, comments, runUrl,
   now = Date.now, softDeadlineMs = 11 * 60 * 1000, commentConcurrency = 4,
+  cleanupRetryNote = 'Rerun Preview auth from the Actions tab.',
 }) {
   const startedAt = now();
   if (eventName === 'workflow_run' && !decommission) {
@@ -218,7 +219,7 @@ export async function previewAuth({
       const action = pr.state === 'open' && pr.base?.ref === targetBranch ? 'reopened' : 'closed';
       outcomes.push(await previewAuth({
         eventName: 'pull_request_target', event: { action, pull_request: pr }, repo, matrix, domain, targetBranch, api, alias, comments, runUrl,
-        reportBuildOutcome: event.workflow_run.event === 'deployment_status',
+        reportBuildOutcome: event.workflow_run.event === 'deployment_status', cleanupRetryNote,
       }));
     }
     const failures = outcomes.flatMap(result => result.failures ?? []);
@@ -473,7 +474,7 @@ export async function previewAuth({
   }
   // Never claim removal when this run has failures: the daily sweep retries cleanup.
   const closeNote = () => failures.length
-    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. The next scheduled preview sweep will retry.' : undefined;
+    ? 'This PR is closed or no longer targets the preview branch. Preview removal is incomplete. ' + cleanupRetryNote : undefined;
   // Re-read the PR so a close or push during the run cannot leave an open-state comment behind.
   const openComment = async (pr, { createIfMissing = true, applyFailures = true } = {}) => {
     let latest;
@@ -630,7 +631,7 @@ export async function previewAuth({
     // A sweep or decommission removed these previews without a close event: close their comments too.
     // Update only. A failure elsewhere in the run must not hide a removal that already happened.
     if (sweep && !onlyPr) {
-      const note = failures.length ? 'Preview removal is incomplete. The next scheduled preview sweep will retry.'
+      const note = failures.length ? 'Preview removal is incomplete. ' + cleanupRetryNote
         : decommission ? 'Previews and sign-in callbacks removed: previews are turned off for this repository.' : undefined;
       for (const pr of removedPrs) {
         // A retired app can lose its alias while the PR stays open with live previews.
@@ -687,9 +688,9 @@ export async function previewAuth({
 
 export function createApi(env, {
   fetchFn = fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  commentAuthor = COMMENT_AUTHOR,
+  commentAuthor = COMMENT_AUTHOR, commentAuthors = [commentAuthor],
 } = {}) {
-  if (!/^[a-zA-Z0-9_-]+\[bot\]$/.test(commentAuthor)) throw new PreviewError('Invalid comment author');
+  if (!Array.isArray(commentAuthors) || !commentAuthors.length || commentAuthors.some(author => typeof author !== 'string' || !/^[a-zA-Z0-9_-]+\[bot\]$/.test(author))) throw new PreviewError('Invalid comment author');
   const services = {
     github: ['GitHub', 'https://api.github.com', 'GITHUB_TOKEN'],
     vercel: ['Vercel', 'https://api.vercel.com', 'VERCEL_TOKEN'],
@@ -832,13 +833,18 @@ export function createApi(env, {
   };
   const comments = {
     async find(number) {
+      let preferred = null, rank = commentAuthors.length;
       for (let page = 1; ; page++) {
         const list = await request('github', `${issueComments(number)}?per_page=100&page=${page}`);
         if (!Array.isArray(list)) throw new PreviewError('GitHub returned an invalid comment list');
-        const match = list.find(c => c?.user?.login === commentAuthor && c.user.type === 'Bot' &&
-          typeof c.body === 'string' && c.body.startsWith(COMMENT_MARKER) && Number.isSafeInteger(c.id));
-        if (match) return { id: match.id, body: match.body };
-        if (list.length < 100) return null;
+        for (const c of list) {
+          const candidateRank = commentAuthors.indexOf(c?.user?.login);
+          if (candidateRank >= 0 && candidateRank < rank && c.user.type === 'Bot' &&
+              typeof c.body === 'string' && c.body.startsWith(COMMENT_MARKER) && Number.isSafeInteger(c.id)) {
+            preferred = { id: c.id, body: c.body }; rank = candidateRank;
+          }
+        }
+        if (rank === 0 || list.length < 100) return preferred;
       }
     },
     create: (number, body) => request('github', issueComments(number), { method: 'POST', body: { body }, attempts: 1 }),

@@ -7,9 +7,12 @@ export function createGitHubApp({ fetchFn = fetch, cryptoImpl = crypto, now = Da
   async function jwt(env) {
     if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) throw new Error('Missing GitHub App configuration');
     const pem = env.GITHUB_APP_PRIVATE_KEY.trim();
-    if (!pem.startsWith('-----BEGIN PRIVATE KEY-----') || !pem.endsWith('-----END PRIVATE KEY-----')) throw new Error('Expected PKCS8 private key');
-    const der = Uint8Array.from(atob(pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')), c => c.charCodeAt(0));
-    const key = await cryptoImpl.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    if (!pem.startsWith('-----BEGIN PRIVATE KEY-----') || !pem.endsWith('-----END PRIVATE KEY-----')) throw new Error('Expected unencrypted PKCS8 PEM (BEGIN PRIVATE KEY); convert PKCS1 with openssl pkcs8 -topk8 -nocrypt before storing it.');
+    let key;
+    try {
+      const der = Uint8Array.from(atob(pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')), c => c.charCodeAt(0));
+      key = await cryptoImpl.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    } catch { throw new Error('Invalid unencrypted PKCS8 PEM private key; expected RSA signing key.'); }
     const seconds = Math.floor(now() / 1000);
     const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({ iat: seconds - 60, exp: seconds + 540, iss: String(env.GITHUB_APP_ID) });
     const signature = await cryptoImpl.subtle.sign('RSASSA-PKCS1-v1_5', key, encoder.encode(unsigned));

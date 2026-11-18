@@ -185,3 +185,124 @@ test('App identity does not match a stranger or the old Actions bot', async () =
   const { comments: adapter } = createApi({ GITHUB_TOKEN: 'test', GITHUB_REPOSITORY: repo }, { commentAuthor: 'preview-test[bot]', fetchFn: async () => reply(comments) });
   assert.equal((await adapter.find(12)).id, 3);
 });
+
+test('poison job is retired after eight failures and the next job can run', async () => {
+  const f = fixture(); await send(f, '/github', github(), { id: 'poison' });
+  await send(f, '/github', github('reopened'), { id: 'healthy' });
+  const storage = f.stores.get(repo);
+  let attempts = 0;
+  const object = new PreviewRepo({ storage }, f.env, { fetchFn: f.fetchFn, access: async (...args) => {
+    if (++attempts <= 8) throw new Error('private credential value');
+    return access(...args);
+  } });
+  for (let i = 1; i <= 7; i++) {
+    await object.alarm();
+    assert.equal((await storage.get('queue'))[0].attempts, i);
+    assert.equal((await storage.get('queue')).length, 2);
+    assert.ok(storage.alarm > Date.now());
+  }
+  await object.alarm();
+  assert.deepEqual(await storage.get('done'), ['github:poison']);
+  assert.equal((await storage.get('queue'))[0].id, 'github:healthy');
+  assert.deepEqual((({attempts,error}) => ({attempts,error}))(await storage.get('last')), {attempts:8,error:'job_execution_failed'});
+  assert.doesNotMatch(JSON.stringify([...storage.data]), /private credential/);
+  await object.alarm();
+  assert.equal((await storage.get('queue')).length, 0);
+  assert.equal(f.comments.length, 1);
+  await worker.scheduled({ scheduledTime: 999 }, f.env);
+  assert.equal((await storage.get('queue'))[0].kind, 'schedule');
+});
+
+test('returned core failures retry with backoff, recover, and obey the same cap', async () => {
+  let fail = true;
+  const f = fixture({ intercept: u => fail && u.origin === 'https://api.vercel.com' ? reply({},403) : undefined });
+  await send(f, '/github', github());
+  const object = f.objects.get(repo), storage = f.stores.get(repo);
+  await object.alarm();
+  assert.equal((await storage.get('queue'))[0].attempts, 1);
+  assert.equal(await storage.get('done'), undefined);
+  assert.ok(storage.alarm > Date.now());
+  fail = false; await object.alarm();
+  assert.equal((await storage.get('queue')).length, 0);
+  assert.equal((await storage.get('last')).error, undefined);
+  fail = true; await send(f, '/github', github(), {id:'capped-core'});
+  for(let i=0;i<8;i++) await object.alarm();
+  assert.equal((await storage.get('queue')).length, 0);
+  const last = await storage.get('last');
+  assert.equal(last.attempts,8); assert.equal(last.error,'core_failures'); assert.ok(last.failures>0);
+});
+
+test('Worker migrates the Actions sticky in place and prefers its own bot across pages', async () => {
+  const f = fixture();
+  f.comments.push({id:42,number:12,user:{login:'github-actions[bot]',type:'Bot'},body:COMMENT_MARKER+'\nold'});
+  await send(f,'/github',github()); await f.drain();
+  assert.equal(f.comments.length,1); assert.equal(f.comments[0].id,42);
+  assert.match(f.comments[0].body,/Ready/);
+  assert.ok(f.calls.some(c=>c.method==='PATCH'&&c.url.endsWith('/issues/comments/42')));
+  assert.equal(f.calls.some(c=>c.method==='POST'&&c.url.includes('/comments')),false);
+  const rows = Array.from({length:100},(_,i)=>({id:i+1,user:{login:'someone',type:'User'},body:COMMENT_MARKER}));
+  rows[0]={id:42,user:{login:'github-actions[bot]',type:'Bot'},body:COMMENT_MARKER};
+  const api=createApi({GITHUB_TOKEN:'test',GITHUB_REPOSITORY:repo},{
+    commentAuthors:['preview-test[bot]','github-actions[bot]'],
+    fetchFn:async url=>reply(new URL(url).searchParams.get('page')==='1'?rows:[{id:101,user:{login:'preview-test[bot]',type:'Bot'},body:COMMENT_MARKER}])
+  });
+  assert.equal((await api.comments.find(12)).id,101);
+  const actionsOnly=createApi({GITHUB_TOKEN:'test',GITHUB_REPOSITORY:repo},{fetchFn:async()=>reply([
+    {id:1,user:{login:'preview-test[bot]',type:'Bot'},body:COMMENT_MARKER},rows[0]
+  ])});
+  assert.equal((await actionsOnly.comments.find(12)).id,42);
+});
+
+test('Vercel rejects missing, blank and non-string configured team even if payload matches', async () => {
+  for(const team of [undefined,'','   ',null,7]){
+    const f=fixture(),event=vercel(); f.env.TEAM_ID=team;
+    event.payload.team={id:team};
+    await send(f,'/vercel',event);
+    assert.equal(f.objects.size,0); assert.equal(f.calls.length,0);
+  }
+});
+
+test('same-commit deployment burst coalesces while queued but later distinct delivery reconciles again', async () => {
+  const f=fixture();
+  for(let i=0;i<6;i++) await send(f,'/vercel',vercel(undefined,{id:'burst-'+i}));
+  const storage=f.stores.get(repo);
+  assert.equal((await storage.get('queue')).length,1);
+  assert.equal((await storage.get('queue'))[0].id,'vercel:'+repo+':'+sha);
+  await f.drain();
+  const before=f.calls.length;
+  await send(f,'/vercel',vercel(undefined,{id:'later'})); await f.drain();
+  assert.ok(f.calls.length>before,'done SHA must not suppress later deployments on the same commit');
+  const after=f.calls.length;
+  await send(f,'/vercel',vercel(undefined,{id:'later'})); await f.drain();
+  assert.equal(f.calls.length,after,'completed delivery is still deduplicated');
+});
+
+test('alarm exceptions re-arm nonempty queue and clear single-flight for recovery', async () => {
+  const f=fixture();await send(f,'/github',github());
+  const storage=f.stores.get(repo), object=f.objects.get(repo), get=storage.get.bind(storage);
+  await storage.deleteAlarm(); let fail=true;
+  storage.get=async key=>{if(key==='queue'&&fail){fail=false;throw new Error('read unavailable');}return get(key);};
+  await assert.rejects(object.alarm(),/read unavailable/);
+  assert.ok(storage.alarm>Date.now()); assert.equal(object.alarmFlight,null);
+  await object.alarm();assert.equal((await storage.get('queue')).length,0);
+});
+
+test('PKCS1 and malformed PKCS8 keys fail with actionable format error before network', async () => {
+  const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+  let calls=0;
+  const provider=createGitHubApp({fetchFn:async()=>{calls++;assert.fail('must not fetch');}});
+  await assert.rejects(provider({GITHUB_APP_ID:'123',GITHUB_APP_PRIVATE_KEY:privateKey.export({type:'pkcs1',format:'pem'})},repo),/PKCS8.*openssl pkcs8 -topk8 -nocrypt/);
+  await assert.rejects(provider({GITHUB_APP_ID:'123',GITHUB_APP_PRIVATE_KEY:'-----BEGIN PRIVATE KEY-----\nbad\n-----END PRIVATE KEY-----'},repo),/Invalid unencrypted PKCS8/);
+  assert.equal(calls,0);
+});
+
+test('Worker runJob uses scheduled-sweep text for incomplete close cleanup', async()=>{
+  let failing=false;
+  const f=fixture({intercept:u=>failing&&u.origin==='https://account-dev.vana.org'?reply({},403):undefined});
+  await send(f,'/github',github());await f.drain();
+  f.prs[0].state='closed'; failing=true;
+  const results=await runJob({kind:'github',repo,action:'closed',pr:f.prs[0]},f.env,{fetchFn:f.fetchFn,access});
+  assert.ok(results.some(r=>r.failures?.length));
+  assert.match(f.comments[0].body,/next scheduled preview sweep will retry/);
+  assert.doesNotMatch(f.comments[0].body,/Actions tab/);
+});

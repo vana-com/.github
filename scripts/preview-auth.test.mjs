@@ -1191,3 +1191,16 @@ test('the sweep reads each listed open PR once for cleanup instead of once per a
   const reads = f.calls.filter(c => c.origin === 'https://api.github.com' && /\/pulls\/12$/.test(c.path));
   assert.ok(reads.length <= 3, `PR reads: ${reads.length}`);
 });
+
+for (const event of [sweep,pullEvent('closed',closedPr)]) {
+  for (const worker of [false,true]) test('cleanup retry copy respects caller for '+event.eventName+' worker='+worker,async()=>{
+    const f=fixture({
+      pr:closedPr,aliases:[mapping(web)],initialComments:[botComment(COMMENT_MARKER+'\nready')],
+      intercept:({origin})=>origin==='https://account-dev.vana.org'?json({},403):undefined,
+    });
+    const result=await f.run({...event,comments:f.comments,...(worker?{cleanupRetryNote:'The next scheduled preview sweep will retry.'}:{})});
+    assert.ok(result.failures.length);
+    assert.match(f.state.comments[0].body,worker?/next scheduled preview sweep will retry/:/Rerun Preview auth from the Actions tab/);
+    assert.doesNotMatch(f.state.comments[0].body,worker?/Actions tab/:/next scheduled preview sweep/);
+  });
+}

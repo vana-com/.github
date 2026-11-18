@@ -79,11 +79,11 @@ export default {
         const project = payload?.project?.id;
         const entry = Object.entries(repos).find(([, c]) => c.matrix.some(app => app.project_id === project));
         if (!entry) return ignored();
-        const [repo] = entry, meta = payload.deployment?.meta;
+        const [repo] = entry, meta = payload.deployment?.meta, team = repoEnv(env, repo).TEAM_ID;
         if (`${meta?.githubCommitOrg}/${meta?.githubCommitRepo}` !== repo || !SHA.test(meta?.githubCommitSha ?? '') ||
-            payload.team?.id !== repoEnv(env, repo).TEAM_ID || (payload.target != null && payload.target !== 'preview')) return ignored();
+            typeof team !== 'string' || !team.trim() || payload.team?.id !== team || (payload.target != null && payload.target !== 'preview')) return ignored();
         if (typeof event.id !== 'string' || !event.id || event.id.length > 200) return new Response('Missing delivery ID', { status: 400 });
-        return await enqueue(env, { id: 'vercel:' + event.id, repo, kind: 'vercel', sha: meta.githubCommitSha });
+        return await enqueue(env, { id: 'vercel:' + repo + ':' + meta.githubCommitSha, deliveryId: 'vercel:' + event.id, repo, kind: 'vercel', sha: meta.githubCommitSha });
       }
       if (request.headers.get('x-github-event') !== 'pull_request' || !actions.has(event.action)) return ignored();
       const repo = event.repository?.full_name, pr = event.pull_request;
@@ -110,8 +110,8 @@ export async function runJob(job, env, { fetchFn = fetch, access = createGitHubA
   if (!config) throw new Error('Unknown repo');
   const scoped = repoEnv(env, job.repo);
   const identity = await access(scoped, job.repo);
-  const adapters = createApi({ ...scoped, GITHUB_TOKEN: identity.token, GITHUB_REPOSITORY: job.repo, PREVIEW_DOMAIN: config.domain }, { fetchFn, commentAuthor: identity.commentAuthor });
-  const run = (eventName, event, reportBuildOutcome = false) => previewAuth({ ...config, repo: job.repo, eventName, event, reportBuildOutcome, ...adapters });
+  const adapters = createApi({ ...scoped, GITHUB_TOKEN: identity.token, GITHUB_REPOSITORY: job.repo, PREVIEW_DOMAIN: config.domain }, { fetchFn, commentAuthors: [identity.commentAuthor, 'github-actions[bot]'] });
+  const run = (eventName, event, reportBuildOutcome = false) => previewAuth({ ...config, repo: job.repo, eventName, event, reportBuildOutcome, cleanupRetryNote: 'The next scheduled preview sweep will retry.', ...adapters });
   if (job.kind === 'schedule') return [await run('schedule', {})];
   if (job.kind === 'github') return [await run('pull_request_target', { action: job.action, pull_request: job.pr })];
   if (job.kind !== 'vercel' || !SHA.test(job.sha)) throw new Error('Invalid job');
@@ -145,7 +145,7 @@ export class PreviewRepo {
       const owner = await tx.get('repo');
       if (owner && owner !== job.repo) throw new Error('Wrong repo object');
       const queue = await tx.get('queue') ?? [], done = await tx.get('done') ?? [];
-      if (queue.some(item => item.id === job.id) || done.includes(job.id)) return true;
+      if (queue.some(item => item.id === job.id) || done.includes(job.deliveryId ?? job.id)) return true;
       if (queue.length >= 200) return false;
       await tx.put('repo', job.repo);
       await tx.put('queue', [...queue, { ...job, attempts: 0 }]);
@@ -157,28 +157,40 @@ export class PreviewRepo {
   alarm() {
     // Cloudflare serializes alarms; the promise also makes the invariant testable offline.
     if (this.alarmFlight) return this.alarmFlight;
-    this.alarmFlight = this.drainOne().finally(() => { this.alarmFlight = null; });
+    this.alarmFlight = this.drainOne().finally(async () => {
+      try {
+        // Keep the scheduled retry/backoff, but repair an alarm lost to an exception.
+        await this.storage.transaction(async tx => {
+          if ((await tx.get('queue'))?.length && await tx.getAlarm() === null)
+            await tx.setAlarm(Date.now() + 60_000);
+        });
+      } finally { this.alarmFlight = null; }
+    });
     return this.alarmFlight;
   }
   async drainOne() {
     const [job] = await this.storage.get('queue') ?? [];
     if (!job) return;
-    let results, failed = false;
-    try { results = await runJob(job, this.env, this.dependencies); } catch { failed = true; }
+    let results = [], error = null;
+    try {
+      results = await runJob(job, this.env, this.dependencies);
+      if (results.some(result => result.failures?.length)) error = 'core_failures';
+    } catch { error = 'job_execution_failed'; } // Never persist arbitrary exception text/credentials.
     await this.storage.transaction(async tx => {
       const queue = await tx.get('queue') ?? [];
       if (queue[0]?.id !== job.id) throw new Error('Queue head changed');
-      if (failed) {
-        queue[0].attempts++;
+      const attempts = (job.attempts ?? 0) + 1;
+      if (error && attempts < 8) {
+        queue[0].attempts = attempts;
         await tx.put('queue', queue);
         await tx.setAlarm(Date.now() + Math.min(30 * 60_000, 30_000 * 2 ** Math.min(queue[0].attempts, 6)));
         return;
       }
       queue.shift();
       await tx.put('queue', queue);
-      await tx.put('done', [...(await tx.get('done') ?? []), job.id].slice(-500));
+      await tx.put('done', [...(await tx.get('done') ?? []), job.deliveryId ?? job.id].slice(-500));
       // Bounded, non-secret operational status; API bodies/credentials are never logged.
-      await tx.put('last', { id: job.id, at: Date.now(), states: results.map(r => r.state), failures: results.reduce((n, r) => n + (r.failures?.length ?? 0), 0) });
+      await tx.put('last', { id: job.id, at: Date.now(), attempts, ...(error ? { error } : {}), states: results.map(r => r.state), failures: results.reduce((n, r) => n + (r.failures?.length ?? 0), 0) });
       if (queue.length) await tx.setAlarm(Date.now() + 1);
       else await tx.deleteAlarm();
     });
